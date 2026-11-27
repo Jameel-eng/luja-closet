@@ -69,6 +69,12 @@ const ICONS = {
   flame: '<path d="M12 21c-3.9 0-6.5-2.6-6.5-6.2 0-3.8 3.3-5.6 3.8-9.8 2.8 1.8 4.2 4.4 4.2 6.4 1-.6 1.7-1.8 1.9-3 1.6 1.6 3.1 3.8 3.1 6.4 0 3.6-2.6 6.2-6.5 6.2z"/>',
   arrow: '<path d="M5 12h14M13 6l6 6-6 6"/>',
   undo: '<path d="M9 14 4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+  eye: '<path d="M2 12s3.6-7 10-7 10 7 10 7-3.6 7-10 7S2 12 2 12z"/><circle cx="12" cy="12" r="3"/>',
+  shield: '<path d="M12 3l8 3v6c0 4.5-3.4 8.3-8 9-4.6-.7-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
+  logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M5 12h11"/>',
+  star: '<path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3M14 9l2 2"/>',
 };
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ''}</svg>`;
 
@@ -88,10 +94,10 @@ const store = {
 let db;
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('luja-closet', 1);
+    const r = indexedDB.open('luja-closet', 2);
     r.onupgradeneeded = () => {
       const d = r.result;
-      for (const s of ['items', 'looks', 'daily']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' });
+      for (const s of ['items', 'looks', 'daily', 'accounts']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' });
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -102,6 +108,23 @@ const os = (s, m = 'readonly') => db.transaction(s, m).objectStore(s);
 const dbAll = s => P(os(s).getAll());
 const dbPut = (s, v) => P(os(s, 'readwrite').put(v));
 const dbDel = (s, id) => P(os(s, 'readwrite').delete(id));
+
+/* ───────────────────────── accounts ─────────────────────────
+   Two accounts. Passwords are stored only as SHA-256 hashes. */
+const DEFAULT_ACCOUNTS = [
+  { id: 'jojo', username: 'JoJo', owner: 'jamil', admin: true, hash: '407f1bff3a166712d7511720cdf6e3537e55a59ce84e7c357a1317f3551f9311' },
+  { id: 'lulu', username: 'LuLu', owner: 'lupita', admin: false, hash: '8c4608f71285c76f9e7c52b201a91e528314913dbcf63327e0aadd530a1d20a1' },
+];
+async function hashPw(pw) {
+  const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode('luja:' + pw));
+  return [...new Uint8Array(buf)].map(b => b.toString(16).padStart(2, '0')).join('');
+}
+const accountFor = owner => S.accounts.find(a => a.owner === owner);
+const canEdit = owner => !!S.me && S.me.owner === owner;
+const otherOwner = o => (o === 'jamil' ? 'lupita' : 'jamil');
+/* who posted a diary entry (older entries fall back to who is in the photo) */
+const dailyBy = d => d.by || (d.who === 'jamil' ? 'jojo' : d.who === 'lupita' ? 'lulu' : null);
+const canEditDaily = d => { const b = dailyBy(d); return !b || b === S.me?.id; };
 
 /* object-URL cache for blobs */
 const urls = new Map();
@@ -376,17 +399,58 @@ const S = {
     jamil:  { occ: 'outside', locks: {}, list: [], idx: 0, error: '', stripCat: 'top' },
   },
   couple: { occ: 'outside', list: [], idx: 0, error: '' },
-  items: [], looks: [], daily: [],
+  items: [], looks: [], daily: [], accounts: [], me: null,
 };
 
 /* ───────────────────────── rendering ───────────────────────── */
 const app = $('#app');
 function render(keepScroll = true) {
   const y = window.scrollY;
+  if (!S.me) { document.body.dataset.view = 'login'; app.innerHTML = viewLogin(); setupLogin(); return; }
   document.body.dataset.view = S.view;
   document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('on', b.dataset.view === S.view));
   app.innerHTML = S.view === 'match' ? viewMatch() : S.view === 'daily' ? viewDaily() : viewPerson(S.view);
   if (keepScroll) window.scrollTo(0, y);
+}
+
+function viewLogin() {
+  return `<section class="login">
+      <div class="login-card">
+        <div class="login-mark">Lu<em>&amp;</em>Ja</div>
+        <p class="login-sub">Our closet · sign in to continue</p>
+        <form id="login-form" autocomplete="on" novalidate>
+          <label class="field"><span>Username</span><input id="lg-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
+          <label class="field"><span>Password</span>
+            <span class="pw-wrap"><input id="lg-pass" name="password" type="password" autocomplete="current-password" required><button type="button" class="pw-eye" id="lg-eye" aria-label="Show password">${icon('eye')}</button></span>
+          </label>
+          <p class="login-err" id="lg-err" role="alert"></p>
+          <button class="btn primary big" type="submit">${icon('arrow')}Enter our closet</button>
+        </form>
+      </div>
+    </section>`;
+}
+function setupLogin() {
+  const f = $('#login-form');
+  $('#lg-eye').onclick = () => { const p = $('#lg-pass'); p.type = p.type === 'password' ? 'text' : 'password'; };
+  f.onsubmit = async e => {
+    e.preventDefault();
+    const u = $('#lg-user').value.trim().toLowerCase(), pw = $('#lg-pass').value;
+    const acc = S.accounts.find(a => a.username.toLowerCase() === u);
+    if (!acc || acc.hash !== await hashPw(pw)) {
+      $('#lg-err').textContent = 'Wrong username or password';
+      $('.login-card').classList.remove('shake'); void $('.login-card').offsetWidth; $('.login-card').classList.add('shake');
+      return;
+    }
+    S.me = acc; store.set('me', acc.id);
+    S.view = acc.owner; persistNav();
+    render(false);
+    toast(`${icon('heart')} Welcome, ${esc(acc.username)}`);
+  };
+  setTimeout(() => $('#lg-user')?.focus(), 50);
+}
+function signOut() {
+  S.me = null; store.set('me', null);
+  closeSheet(true); render(false);
 }
 
 function hero(kicker, title, sub, extra = '') {
@@ -417,12 +481,17 @@ function viewCloset(p, items) {
       <div class="chips">${chip('f-cat', 'all', 'Everything', f.cat === 'all')}${CATS_FOR[p].map(c => chip('f-cat', c, CATS[c].plural, f.cat === c)).join('')}</div>
     </div>`;
   let grid;
+  const mine = canEdit(p);
   if (!items.length) {
-    grid = `<div class="empty">
+    grid = mine ? `<div class="empty">
         <div class="empty-art">${icon('hanger')}</div>
         <h3>${PEOPLE[p].name}'s closet is empty</h3>
         <p>Snap a photo of each piece once — tops, bottoms${p === 'lupita' ? ', dresses' : ''}, shoes. The color is detected automatically. You can add many photos at once from your library.</p>
         <div class="row-btns"><button class="btn primary" data-act="add" data-src="camera">${icon('camera')}Take a photo</button><button class="btn" data-act="add" data-src="library">${icon('image')}From library</button></div>
+      </div>` : `<div class="empty">
+        <div class="empty-art">${icon('hanger')}</div>
+        <h3>${PEOPLE[p].name}'s closet is empty</h3>
+        <p>Only ${esc(accountFor(p)?.username || PEOPLE[p].name)} can add clothes here. Once they do, you can browse and style them.</p>
       </div>`;
   } else if (!filtered.length) {
     grid = `<div class="empty small"><p>Nothing here with these filters yet.</p></div>`;
@@ -434,7 +503,8 @@ function viewCloset(p, items) {
       return `<section class="cat-group"><h2>${CATS[c].plural}<span>${list.length}</span></h2><div class="grid">${list.map(itemCard).join('')}</div></section>`;
     }).join('');
   }
-  return filters + grid + (items.length ? `<button class="fab" data-act="add-menu" aria-label="Add a piece">${icon('plus')}<span>Add piece</span></button>` : '');
+  const note = !mine && items.length ? `<p class="view-only">${icon('eye')}Viewing ${PEOPLE[p].name}'s closet — only ${esc(accountFor(p)?.username || PEOPLE[p].name)} can add, edit or delete here.</p>` : '';
+  return note + filters + grid + (items.length && mine ? `<button class="fab" data-act="add-menu" aria-label="Add a piece">${icon('plus')}<span>Add piece</span></button>` : '');
 }
 function itemCard(it) {
   return `<button class="item" data-act="open-item" data-id="${it.id}">
@@ -591,7 +661,7 @@ function viewDaily() {
       <div class="capture-txt">
         <p class="kicker">${fmtDate(t)}</p>
         <h3>${today.length ? 'Today is captured ✦' : 'What are you wearing today?'}</h3>
-        <p class="muted">${today.length ? 'Add another — one for each of you, or a couple shot.' : 'One photo a day builds your outfit diary.'}</p>
+        <p class="muted">${today.length ? 'Add another — one for each of you, or a couple shot.' : 'Post your look — then rate each other’s outfits.'}</p>
         <div class="row-btns"><button class="btn primary" data-act="daily-add" data-src="camera">${icon('camera')}Capture</button><button class="btn" data-act="daily-add" data-src="library">${icon('image')}Upload</button></div>
       </div>
       <div class="capture-stats">
@@ -606,6 +676,7 @@ function viewDaily() {
           <img loading="lazy" src="${url(d)}" alt="">
           <span class="diary-meta"><b>${new Date(d.date + 'T12:00:00').getDate()}</b><small>${new Date(d.date + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })}</small></span>
           <span class="who-tag w-${d.who}">${d.who === 'us' ? 'Us' : PEOPLE[d.who].name}</span>
+          ${(() => { const r = ratingFor(d); return r ? `<span class="rate-tag">${icon('star')}${r.n}</span>` : (!canEditDaily(d) ? '<span class="rate-tag todo">Rate</span>' : ''); })()}
         </button>`).join('')}</div></section>`).join('')
     : `<div class="empty small"><p>Your diary starts with the first photo.</p></div>`;
   return hero('Outfit diary', `Daily<em>.</em>`, 'A little archive of what you both wore — and when.') + capture + timeline;
@@ -731,6 +802,7 @@ function editItem(it) {
     'ed-pat': el => { d.pattern = el.dataset.val; body.querySelectorAll('#ed-pat button').forEach(b => b.classList.toggle('on', b === el)); },
     'ed-skip': () => { closeSheet(); setTimeout(nextInQueue, 300); },
     'ed-save': async () => {
+      if (!canEdit(d.owner)) { toast('You can only edit your own closet'); return; }
       if (!d.occ.length) { toast('Pick at least one occasion'); return; }
       const name = $('#ed-name', body).value.trim() || `${ci(d.color).name} ${CATS[d.cat].label.toLowerCase()}`;
       const rec = { id: d.id || uid(), owner: d.owner, cat: d.cat, name, color: d.color, pattern: d.pattern, occ: Object.keys(OCC).filter(k => d.occ.includes(k)), img: d.img, created: d.created || Date.now() };
@@ -744,24 +816,44 @@ function editItem(it) {
       if (queue.length) setTimeout(nextInQueue, 320);
     },
     'ed-delete': async () => {
+      if (!canEdit(d.owner)) return;
       if (!(await confirmSheet('Delete this piece?', `“${esc(d.name)}” will be removed from the closet and from any saved looks.`))) return;
       await dbDel('items', d.id);
       S.items = S.items.filter(x => x.id !== d.id);
       for (const st of Object.values(S.style)) for (const c in st.locks) if (st.locks[c] === d.id) delete st.locks[c];
       invalidate(d.owner); render(); toast('Piece deleted');
     },
-    'ed-style': () => {
-      const st = S.style[d.owner];
-      closeSheet();
-      st.locks = { [d.cat]: d.id };
-      if (!d.occ.includes(st.occ)) st.occ = d.occ[0];
-      st.stripCat = d.cat;
-      S.view = d.owner; S.sub[d.owner] = 'style';
-      runGenerate(d.owner); render(false); window.scrollTo({ top: 0, behavior: 'smooth' });
-    },
+    'ed-style': () => styleFrom(d),
   };
 }
 let sheetHandlers = {};
+
+/* read-only view of the other person's piece */
+function viewItem(it) {
+  openSheet(`
+    <div class="editor">
+      <div class="ed-photo"><img src="${url(it)}" alt=""></div>
+      <div class="ed-form">
+        <p class="kicker">${PEOPLE[it.owner].name}'s piece · view only</p>
+        <h3 class="item-title">${esc(it.name)}</h3>
+        <div class="field"><span>Type</span><div class="chips wrap"><span class="chip on">${CATS[it.cat].label}</span></div></div>
+        <div class="field"><span>Wear it for</span><div class="chips wrap">${it.occ.map(o => `<span class="chip">${icon(OCC[o].icon)}${OCC[o].label}</span>`).join('')}</div></div>
+        <div class="field"><span>Color</span><div class="chips wrap"><span class="chip"><i class="dot" style="--c:${it.color}"></i>${ci(it.color).name}${it.pattern === 'pattern' ? ' · pattern' : ''}</span></div></div>
+        <p class="muted tiny">Only ${esc(accountFor(it.owner)?.username || PEOPLE[it.owner].name)} can edit or delete this piece.</p>
+        <div class="row-btns sticky"><button class="btn primary grow" data-act="ed-style">${icon('wand')}Style this piece</button></div>
+      </div>
+    </div>`, { cls: 'wide' });
+  sheetHandlers = { 'ed-style': () => styleFrom(it) };
+}
+function styleFrom(d) {
+  const st = S.style[d.owner];
+  closeSheet();
+  st.locks = { [d.cat]: d.id };
+  if (!d.occ.includes(st.occ)) st.occ = d.occ[0];
+  st.stripCat = d.cat;
+  S.view = d.owner; S.sub[d.owner] = 'style';
+  runGenerate(d.owner); render(false); window.scrollTo({ top: 0, behavior: 'smooth' });
+}
 
 function invalidate(owner) {
   if (owner) { const st = S.style[owner]; st.list = []; st.idx = 0; st.error = ''; }
@@ -788,11 +880,16 @@ const actions = {
   },
   add: el => {
     closeSheet(true);
+    if (!canEdit(S.view)) { toast('You can only add to your own closet'); return; }
     const inp = el.dataset.src === 'camera' ? $('#pick-camera') : $('#pick-library');
     inp.onchange = () => { const files = [...inp.files]; inp.value = ''; startAdd(files); };
     inp.click();
   },
-  'open-item': el => { const it = S.items.find(i => i.id === el.dataset.id); if (it) editItem(it); },
+  'open-item': el => {
+    const it = S.items.find(i => i.id === el.dataset.id);
+    if (!it) return;
+    canEdit(it.owner) ? editItem(it) : viewItem(it);
+  },
 
   'style-occ': el => { const st = S.style[S.view]; st.occ = el.dataset.val; runGenerate(S.view); if (!st.list.length && !st.error) st.list = []; render(); },
   'strip-cat': el => { S.style[S.view].stripCat = el.dataset.val; render(); },
@@ -872,7 +969,7 @@ const actions = {
       if (!f) return;
       toast('Reading photo…');
       const { blob } = await processImage(f, 1400);
-      dailyEditor({ id: null, img: blob, date: todayISO(), who: 'us', occ: 'outside', note: '' });
+      dailyEditor({ id: null, by: S.me.id, img: blob, date: todayISO(), who: S.me.owner, occ: 'outside', note: '', ratings: {} });
     };
     inp.click();
   },
@@ -887,22 +984,39 @@ function runCouple() {
   S.couple.list = r.list; S.couple.idx = 0; S.couple.error = r.error || '';
 }
 
+/* ───────────────────────── diary: post, view, rate ───────────────────────── */
+const RATE_WORDS = ['', 'Hmm…', 'Okay', 'Nice', 'Love it', 'Obsessed'];
+function stars(n, { act = '', size = '' } = {}) {
+  return `<span class="stars ${size} ${act ? 'live' : ''}">${[1, 2, 3, 4, 5].map(i =>
+    act ? `<button data-act="${act}" data-val="${i}" class="${i <= n ? 'on' : ''}" aria-label="${i} star${i > 1 ? 's' : ''}">${icon('star')}</button>`
+        : `<i class="${i <= n ? 'on' : ''}">${icon('star')}</i>`).join('')}</span>`;
+}
+/* the rating the *other* account gave this entry */
+function ratingFor(d) {
+  const by = dailyBy(d), r = d.ratings || {};
+  const from = Object.keys(r).find(k => k !== by);
+  return from ? { from, n: r[from], name: S.accounts.find(a => a.id === from)?.username || '' } : null;
+}
+
 function dailyEditor(rec) {
   const d = { ...rec };
   const isNew = !rec.id;
+  if (!isNew && !canEditDaily(rec)) return dailyView(rec);
   const u = URL.createObjectURL(d.img);
+  const got = isNew ? null : ratingFor(rec);
   const body = openSheet(`
     <div class="editor">
       <div class="ed-photo tall"><img src="${u}" alt=""></div>
       <div class="ed-form">
         <p class="kicker">${isNew ? 'New diary entry' : fmtDate(d.date)}</p>
+        ${got ? `<div class="rated-box"><p class="kicker">${esc(got.name)} rated it</p>${stars(got.n, { size: 'lg' })}<b>${RATE_WORDS[got.n]}</b></div>` : ''}
         <label class="field"><span>Date</span><input type="date" id="dy-date" value="${d.date}" max="${todayISO()}"></label>
         <div class="field"><span>Who's in it</span><div class="seg small" id="dy-who">${[['us', 'Us both'], ['lupita', 'Lupita'], ['jamil', 'Jamil']].map(([k, l]) => `<button class="${d.who === k ? 'on' : ''}" data-act="dy-who" data-val="${k}">${l}</button>`).join('')}</div></div>
         <div class="field"><span>Occasion</span><div class="chips wrap" id="dy-occ">${Object.entries(OCC).map(([k, o]) => chip('dy-occ', k, icon(o.icon) + o.label, d.occ === k)).join('')}</div></div>
         <label class="field"><span>Note</span><input id="dy-note" maxlength="120" placeholder="Brunch at our spot ☕" value="${esc(d.note)}"></label>
         <div class="row-btns sticky">
           ${isNew ? '' : `<button class="btn danger" data-act="dy-del" aria-label="Delete">${icon('trash')}</button>`}
-          <button class="btn primary grow" data-act="dy-save">${icon('check')}${isNew ? 'Add to diary' : 'Save'}</button>
+          <button class="btn primary grow" data-act="dy-save">${icon('check')}${isNew ? 'Post to diary' : 'Save'}</button>
         </div>
       </div>
     </div>`, { cls: 'wide', onClose: () => URL.revokeObjectURL(u) });
@@ -910,11 +1024,11 @@ function dailyEditor(rec) {
     'dy-who': el => { d.who = el.dataset.val; body.querySelectorAll('#dy-who button').forEach(b => b.classList.toggle('on', b === el)); },
     'dy-occ': el => { d.occ = el.dataset.val; body.querySelectorAll('#dy-occ .chip').forEach(b => b.classList.toggle('on', b === el)); },
     'dy-save': async () => {
-      const r = { id: d.id || uid(), img: d.img, date: $('#dy-date', body).value || todayISO(), who: d.who, occ: d.occ, note: $('#dy-note', body).value.trim(), created: d.created || Date.now() };
+      const r = { id: d.id || uid(), by: d.by || S.me.id, img: d.img, date: $('#dy-date', body).value || todayISO(), who: d.who, occ: d.occ, note: $('#dy-note', body).value.trim(), ratings: d.ratings || {}, created: d.created || Date.now() };
       await dbPut('daily', r);
       const i = S.daily.findIndex(x => x.id === r.id);
       i >= 0 ? (S.daily[i] = r) : S.daily.push(r);
-      closeSheet(); render(); toast(`${icon('camera')} Added to your diary`);
+      closeSheet(); render(); toast(`${icon('camera')} ${isNew ? 'Posted to your diary' : 'Saved'}`);
     },
     'dy-del': async () => {
       if (!(await confirmSheet('Delete this photo?', 'It will be removed from your outfit diary.'))) return;
@@ -925,17 +1039,53 @@ function dailyEditor(rec) {
   };
 }
 
+/* the other person's post: view it and rate it */
+function dailyView(d) {
+  const by = S.accounts.find(a => a.id === dailyBy(d));
+  const mine = (d.ratings || {})[S.me.id] || 0;
+  const body = openSheet(`
+    <div class="editor">
+      <div class="ed-photo tall"><img src="${url(d)}" alt=""></div>
+      <div class="ed-form">
+        <p class="kicker">${fmtDate(d.date)} · posted by ${esc(by?.username || '')}</p>
+        <h3 class="item-title">${d.note ? esc(d.note) : `${d.who === 'us' ? 'Us both' : PEOPLE[d.who].name} · ${OCC[d.occ]?.label || ''}`}</h3>
+        <div class="chips wrap"><span class="chip">${d.who === 'us' ? 'Us both' : PEOPLE[d.who].name}</span>${OCC[d.occ] ? `<span class="chip">${icon(OCC[d.occ].icon)}${OCC[d.occ].label}</span>` : ''}</div>
+        <div class="rate-box">
+          <p class="kicker">Rate ${esc(by?.username || 'this')}'s outfit</p>
+          <div id="rate-stars">${stars(mine, { act: 'dy-rate', size: 'xl' })}</div>
+          <b id="rate-word">${mine ? RATE_WORDS[mine] : 'Tap a star'}</b>
+        </div>
+        <div class="row-btns sticky"><button class="btn primary grow" data-act="close-sheet">Done</button></div>
+      </div>
+    </div>`, { cls: 'wide' });
+  sheetHandlers = {
+    'dy-rate': async el => {
+      const n = +el.dataset.val;
+      const rec = S.daily.find(x => x.id === d.id);
+      if (!rec) return;
+      rec.ratings = { ...(rec.ratings || {}), [S.me.id]: n };
+      await dbPut('daily', rec);
+      $('#rate-stars', body).innerHTML = stars(n, { act: 'dy-rate', size: 'xl' });
+      $('#rate-word', body).textContent = RATE_WORDS[n];
+      $('#rate-stars', body).classList.remove('pop'); void body.offsetWidth; $('#rate-stars', body).classList.add('pop');
+      render(); toast(`${icon('star')} You rated it ${n}/5`);
+    },
+  };
+}
+
+/* ───────────────────────── settings ───────────────────────── */
 async function settingsSheet() {
   let est = '';
   try { const e = await navigator.storage.estimate(); est = `${(e.usage / 1048576).toFixed(1)} MB used on this device`; } catch {}
-  let persisted = false;
-  try { persisted = await navigator.storage.persisted(); } catch {}
   const body = openSheet(`<div class="confirm settings">
-      <h3>Your data</h3>
-      <p class="muted">Everything — every photo, look and diary entry — is saved on this device, so you never have to photograph your clothes twice. ${est ? esc(est) + '.' : ''} ${persisted ? 'Storage is protected from automatic cleanup.' : ''}</p>
+      <div class="me-row"><span class="avatar a-${S.me.owner}">${esc(S.me.username.slice(0, 2))}</span><div><b>${esc(S.me.username)}</b><small>${S.me.admin ? 'Admin · ' : ''}${PEOPLE[S.me.owner].name}'s account</small></div>
+        <button class="btn sm" data-act="sign-out">${icon('logout')}Sign out</button></div>
+      ${S.me.admin ? `<button class="admin-entry" data-act="admin">${icon('shield')}<span><b>Admin panel</b><small>Accounts, both closets, diary</small></span>${icon('arrow')}</button>` : ''}
+      <h4>Your data</h4>
+      <p class="muted">Every photo, look and diary post is saved on this device. ${est ? esc(est) + '.' : ''}</p>
       <div class="set-stats"><div><b>${S.items.filter(i => i.owner === 'lupita').length}</b><span>Lupita</span></div><div><b>${S.items.filter(i => i.owner === 'jamil').length}</b><span>Jamil</span></div><div><b>${S.looks.length}</b><span>looks</span></div><div><b>${S.daily.length}</b><span>diary</span></div></div>
       <h4>Backup &amp; move to another phone</h4>
-      <p class="muted">Download a backup file, then open it on the other phone with “Restore”. Restoring merges — nothing is lost.</p>
+      <p class="muted">Download a backup, then open it on the other phone with “Restore”. Restoring merges — nothing is lost, and ratings are combined.</p>
       <div class="row-btns col"><button class="btn primary" id="st-export">${icon('download')}Download backup</button><button class="btn" id="st-import">${icon('upload')}Restore from backup</button></div>
       <p class="muted tiny">Tip: on iPhone, tap Share → “Add to Home Screen” to use LuJa like a real app.</p>
     </div>`);
@@ -947,11 +1097,112 @@ async function settingsSheet() {
   };
 }
 
+/* ───────────────────────── admin panel (JoJo only) ───────────────────────── */
+let adminTab = 'accounts', adminOwner = 'lupita';
+function adminPanel() {
+  if (!S.me?.admin) { toast('Admins only'); return; }
+  const tabs = [['accounts', 'Accounts'], ['clothes', 'Clothes'], ['diary', 'Diary'], ['data', 'Data']];
+  let inner = '';
+  if (adminTab === 'accounts') {
+    inner = S.accounts.map(a => `
+      <form class="acc-card" data-acc="${a.id}">
+        <div class="acc-head"><span class="avatar a-${a.owner}">${esc(a.username.slice(0, 2))}</span>
+          <div><b>${esc(a.username)}</b><small>${PEOPLE[a.owner].name}'s closet${a.admin ? ' · admin' : ''}${a.id === S.me.id ? ' · you' : ''}</small></div></div>
+        <label class="field"><span>Username</span><input name="username" value="${esc(a.username)}" maxlength="24" autocapitalize="none" spellcheck="false" required></label>
+        <label class="field"><span>New password <small>leave empty to keep</small></span><input name="password" type="password" minlength="4" autocomplete="new-password" placeholder="••••••••"></label>
+        <div class="stat-line"><span>${S.items.filter(i => i.owner === a.owner).length} pieces</span><span>${S.daily.filter(d => dailyBy(d) === a.id).length} diary posts</span></div>
+        <button class="btn primary" type="submit">${icon('check')}Save ${esc(a.username)}</button>
+      </form>`).join('');
+  } else if (adminTab === 'clothes') {
+    const list = S.items.filter(i => i.owner === adminOwner).sort((a, b) => CATS_FOR.lupita.indexOf(a.cat) - CATS_FOR.lupita.indexOf(b.cat));
+    inner = `<div class="seg small">${['lupita', 'jamil'].map(o => `<button class="${adminOwner === o ? 'on' : ''}" data-act="admin-owner" data-val="${o}">${PEOPLE[o].name} · ${S.items.filter(i => i.owner === o).length}</button>`).join('')}</div>
+      ${list.length ? `<div class="admin-grid">${list.map(i => `
+        <div class="admin-tile"><img loading="lazy" src="${url(i)}" alt=""><span>${esc(i.name)}<small>${CATS[i.cat].label}</small></span>
+          <button data-act="admin-del-item" data-id="${i.id}" aria-label="Delete ${esc(i.name)}">${icon('trash')}</button></div>`).join('')}</div>`
+        : `<p class="muted center">${PEOPLE[adminOwner].name}'s closet is empty.</p>`}`;
+  } else if (adminTab === 'diary') {
+    const list = [...S.daily].sort((a, b) => b.date.localeCompare(a.date));
+    inner = list.length ? `<div class="admin-grid">${list.map(d => {
+      const r = ratingFor(d);
+      return `<div class="admin-tile"><img loading="lazy" src="${url(d)}" alt=""><span>${fmtDate(d.date)}<small>by ${esc(S.accounts.find(a => a.id === dailyBy(d))?.username || '—')}${r ? ` · ★${r.n}` : ''}</small></span>
+        <button data-act="admin-del-daily" data-id="${d.id}" aria-label="Delete post">${icon('trash')}</button></div>`;
+    }).join('')}</div>` : '<p class="muted center">No diary posts yet.</p>';
+  } else {
+    inner = `<div class="danger-zone">
+        <div><b>Reset accounts</b><p class="muted">Set both usernames and passwords back to the original ones.</p><button class="btn" data-act="admin-reset-acc">${icon('key')}Reset accounts</button></div>
+        <div><b>Clear all ratings</b><p class="muted">Removes every star from the diary.</p><button class="btn" data-act="admin-clear-ratings">${icon('star')}Clear ratings</button></div>
+        <div><b>Erase everything</b><p class="muted">Deletes all clothes, looks and diary photos on this device. Download a backup first.</p><button class="btn danger" data-act="admin-wipe">${icon('trash')}Erase all data</button></div>
+      </div>`;
+  }
+  const body = openSheet(`<div class="admin">
+      <p class="kicker">${icon('shield')} Admin · ${esc(S.me.username)}</p>
+      <h3>Admin panel</h3>
+      <div class="admin-tabs">${tabs.map(([k, l]) => `<button class="${adminTab === k ? 'on' : ''}" data-act="admin-tab" data-val="${k}">${l}</button>`).join('')}</div>
+      <div class="admin-body">${inner}</div>
+    </div>`, { cls: 'wide' });
+  body.querySelectorAll('form.acc-card').forEach(f => f.onsubmit = async e => {
+    e.preventDefault();
+    const a = S.accounts.find(x => x.id === f.dataset.acc);
+    const name = f.username.value.trim(), pw = f.password.value;
+    if (!/^[\w.\- ]{2,24}$/.test(name)) { toast('Username: 2–24 letters or numbers'); return; }
+    if (S.accounts.some(x => x.id !== a.id && x.username.toLowerCase() === name.toLowerCase())) { toast('That username is taken'); return; }
+    if (pw && pw.length < 4) { toast('Password needs at least 4 characters'); return; }
+    const upd = { ...a, username: name, hash: pw ? await hashPw(pw) : a.hash };
+    await dbPut('accounts', upd);
+    S.accounts = S.accounts.map(x => x.id === a.id ? upd : x);
+    if (S.me.id === a.id) S.me = upd;
+    adminPanel(); render();
+    toast(`${icon('check')} ${esc(name)} updated${pw ? ' · new password set' : ''}`);
+  });
+}
+const adminActions = {
+  admin: () => { adminTab = 'accounts'; adminPanel(); },
+  'admin-tab': el => { adminTab = el.dataset.val; adminPanel(); },
+  'admin-owner': el => { adminOwner = el.dataset.val; adminPanel(); },
+  'admin-del-item': async el => {
+    const it = S.items.find(i => i.id === el.dataset.id);
+    if (!it || !(await confirmSheet('Delete this piece?', `“${esc(it.name)}” will be removed from ${PEOPLE[it.owner].name}'s closet.`))) { adminPanel(); return; }
+    await dbDel('items', it.id);
+    S.items = S.items.filter(x => x.id !== it.id);
+    for (const st of Object.values(S.style)) for (const c in st.locks) if (st.locks[c] === it.id) delete st.locks[c];
+    invalidate(it.owner); render(); adminPanel(); toast('Piece deleted');
+  },
+  'admin-del-daily': async el => {
+    if (!(await confirmSheet('Delete this diary post?', 'The photo and its rating will be removed.'))) { adminPanel(); return; }
+    await dbDel('daily', el.dataset.id);
+    S.daily = S.daily.filter(x => x.id !== el.dataset.id);
+    render(); adminPanel(); toast('Post deleted');
+  },
+  'admin-reset-acc': async () => {
+    if (!(await confirmSheet('Reset both accounts?', 'Usernames and passwords go back to the original JoJo and LuLu logins.', 'Reset'))) { adminPanel(); return; }
+    for (const a of DEFAULT_ACCOUNTS) await dbPut('accounts', { ...a });
+    S.accounts = DEFAULT_ACCOUNTS.map(a => ({ ...a }));
+    S.me = S.accounts.find(a => a.id === S.me.id);
+    render(); adminPanel(); toast('Accounts reset');
+  },
+  'admin-clear-ratings': async () => {
+    if (!(await confirmSheet('Clear all ratings?', 'Every star on every diary post will be removed.', 'Clear'))) { adminPanel(); return; }
+    for (const d of S.daily) { d.ratings = {}; await dbPut('daily', d); }
+    render(); adminPanel(); toast('Ratings cleared');
+  },
+  'admin-wipe': async () => {
+    if (!(await confirmSheet('Erase everything?', 'All clothes, saved looks and diary photos on this device will be permanently deleted. This cannot be undone.', 'Erase all'))) { adminPanel(); return; }
+    for (const s of ['items', 'looks', 'daily']) await P(os(s, 'readwrite').clear());
+    S.items = []; S.looks = []; S.daily = [];
+    invalidate('lupita'); invalidate('jamil');
+    closeSheet(); render(); toast('Everything erased');
+  },
+  'sign-out': () => signOut(),
+};
+Object.assign(actions, adminActions);
+
+/* ───────────────────────── backup ───────────────────────── */
 async function exportBackup() {
   toast('Packing your closet…');
   const ser = async r => r.img ? { ...r, img: await blobToDataURL(r.img) } : r;
   const data = {
-    app: 'luja-closet', version: 1, exported: new Date().toISOString(),
+    app: 'luja-closet', version: 2, exported: new Date().toISOString(),
+    accounts: S.accounts,
     items: await Promise.all(S.items.map(ser)),
     looks: S.looks,
     daily: await Promise.all(S.daily.map(ser)),
@@ -976,8 +1227,19 @@ async function importBackup(file) {
     let n = 0;
     for (const r of data.items || []) { r.img = await dataURLToBlob(r.img); await dbPut('items', r); n++; }
     for (const r of data.looks || []) await dbPut('looks', r);
-    for (const r of data.daily || []) { r.img = await dataURLToBlob(r.img); await dbPut('daily', r); }
+    for (const r of data.daily || []) {
+      r.img = await dataURLToBlob(r.img);
+      const cur = S.daily.find(x => x.id === r.id);
+      r.ratings = { ...(cur?.ratings || {}), ...(r.ratings || {}) };
+      await dbPut('daily', r);
+    }
+    // account changes made by the admin travel with the backup; only JoJo stays admin
+    for (const a of data.accounts || []) {
+      const base = DEFAULT_ACCOUNTS.find(x => x.id === a.id);
+      if (base && typeof a.username === 'string' && /^[0-9a-f]{64}$/.test(a.hash)) await dbPut('accounts', { ...base, username: a.username, hash: a.hash });
+    }
     await loadAll(); invalidate('lupita'); invalidate('jamil');
+    S.me = S.accounts.find(a => a.id === S.me?.id) || null;
     closeSheet(); render();
     toast(`${icon('check')} Restored ${n} pieces`);
   } catch (e) {
@@ -990,13 +1252,19 @@ document.addEventListener('click', e => {
   const el = e.target.closest('[data-act]');
   if (!el || el.disabled) return;
   const a = el.dataset.act;
+  if (!S.me && a !== 'close-sheet') return;
   if (a.startsWith('ed-') || a.startsWith('dy-')) { sheetHandlers[a]?.(el, e); return; }
   if (actions[a]) { e.preventDefault(); actions[a](el, e); }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
 async function loadAll() {
-  [S.items, S.looks, S.daily] = await Promise.all([dbAll('items'), dbAll('looks'), dbAll('daily')]);
+  [S.items, S.looks, S.daily, S.accounts] = await Promise.all([dbAll('items'), dbAll('looks'), dbAll('daily'), dbAll('accounts')]);
+  if (!S.accounts.length) {
+    for (const a of DEFAULT_ACCOUNTS) await dbPut('accounts', { ...a });
+    S.accounts = DEFAULT_ACCOUNTS.map(a => ({ ...a }));
+  }
+  S.accounts.sort((a, b) => (b.admin ? 1 : 0) - (a.admin ? 1 : 0));
 }
 
 async function init() {
@@ -1012,6 +1280,7 @@ async function init() {
     app.innerHTML = `<div class="empty"><h3>Storage is blocked</h3><p>This browser is not allowing the app to save data (private mode?). Open LuJa in a normal window.</p></div>`;
     return;
   }
+  S.me = S.accounts.find(a => a.id === store.get('me', null)) || null;
   render(false);
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }

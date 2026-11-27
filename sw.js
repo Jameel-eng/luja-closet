@@ -1,6 +1,6 @@
 // Offline-first: the app opens instantly from the cache, then quietly
 // fetches any update in the background (used on the next launch).
-const CACHE = 'luja-v2';
+const CACHE = 'luja-v3';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'icon.svg', 'icon-180.png', 'manifest.webmanifest'];
 
 self.addEventListener('install', e => {
