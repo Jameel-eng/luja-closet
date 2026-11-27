@@ -1,0 +1,54 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>LuJa Closet</title>
+  <meta name="description" content="Lupita & Jamil's shared closet — outfits, couple looks and a daily outfit diary.">
+  <meta name="theme-color" content="#f6f1ea" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#131110" media="(prefers-color-scheme: dark)">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="default">
+  <meta name="apple-mobile-web-app-title" content="LuJa">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icon-180.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body data-view="lupita">
+  <div class="bg-blobs" aria-hidden="true"><i></i><i></i><i></i></div>
+
+  <header class="topbar">
+    <a class="brand" href="#" data-act="nav" data-view="lupita" aria-label="LuJa home">
+      <span class="brand-mark">Lu<em>&</em>Ja</span>
+      <span class="brand-sub">our closet</span>
+    </a>
+    <button class="icon-btn" data-act="settings" aria-label="Settings &amp; backup"></button>
+  </header>
+
+  <main id="app" tabindex="-1"></main>
+
+  <nav class="tabbar" aria-label="Sections">
+    <button data-act="nav" data-view="lupita"><span class="tab-ic" data-icon="hanger"></span><span>Lupita</span></button>
+    <button data-act="nav" data-view="jamil"><span class="tab-ic" data-icon="hanger"></span><span>Jamil</span></button>
+    <button data-act="nav" data-view="match"><span class="tab-ic" data-icon="hearts"></span><span>Matching</span></button>
+    <button data-act="nav" data-view="daily"><span class="tab-ic" data-icon="camera"></span><span>Daily</span></button>
+  </nav>
+
+  <div id="sheet-root"></div>
+  <div id="toast" role="status" aria-live="polite"></div>
+
+  <input type="file" id="pick-library" accept="image/*" multiple hidden>
+  <input type="file" id="pick-camera" accept="image/*" capture="environment" hidden>
+  <input type="file" id="pick-daily" accept="image/*" hidden>
+  <input type="file" id="pick-daily-cam" accept="image/*" capture="user" hidden>
+  <input type="file" id="pick-replace" accept="image/*" hidden>
+  <input type="file" id="pick-backup" accept="application/json,.json" hidden>
+
+  <script src="app.js" type="module"></script>
+</body>
+</html>
