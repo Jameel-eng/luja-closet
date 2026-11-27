@@ -2,6 +2,7 @@
    Everything is stored on-device in IndexedDB (photos included). */
 
 import * as remote from './sync.js';
+const APP_VERSION = '7';
 
 /* ───────────────────────── constants ───────────────────────── */
 const PEOPLE = {
@@ -432,6 +433,7 @@ function viewLogin() {
       <div class="login-card">
         <div class="login-mark">Lu<em>&amp;</em>Ja</div>
         <p class="login-sub">Our closet · sign in to continue</p>
+        ${remote.enabled ? `<p class="cloud-chip">${icon('hearts')}Shared closet — both phones see everything</p>` : ''}
         <form id="login-form" autocomplete="on" novalidate>
           <label class="field"><span>Username</span><input id="lg-user" name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required></label>
           <label class="field"><span>Password</span>
@@ -1166,7 +1168,7 @@ async function settingsSheet() {
       <div class="me-row"><span class="avatar a-${S.me.owner}">${esc(S.me.username.slice(0, 2))}</span><div><b>${esc(S.me.username)}</b><small>${S.me.admin ? 'Admin · ' : ''}${PEOPLE[S.me.owner].name}'s account</small><small class="remembered">${sessionInfo?.remember ? `${icon('check')}Remembered on this phone` : 'Not remembered — you’ll sign in next time'}</small></div>
         <button class="btn sm" data-act="sign-out">${icon('logout')}Sign out</button></div>
       ${S.me.admin ? `<button class="admin-entry" data-act="admin">${icon('shield')}<span><b>Admin panel</b><small>Accounts, both closets, diary</small></span>${icon('arrow')}</button>` : ''}
-      <h4>Your data</h4>
+      <h4>Your data <small class="ver">v${APP_VERSION}${remote.enabled ? ' · shared' : ' · this phone only'}</small></h4>
       <p class="muted">${remote.enabled
         ? `${icon('check')} Shared closet — clothes, looks, diary posts and ratings sync live between both phones${syncState.last ? ` · last synced ${syncState.last.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}${syncState.error ? ` · ${esc(syncState.error)}` : ''}. A copy is kept on this phone so it opens instantly.`
         : `Every photo, look and diary post is saved on this device. ${est ? esc(est) + '.' : ''}`}</p>
@@ -1486,7 +1488,13 @@ async function init() {
     if (S.me) { sessionInfo = { remember: remote.isRemembered() }; startSync(); }
   } else S.me = await restoreSession();
   render(false);
-  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
+  if ('serviceWorker' in navigator && location.protocol === 'https:') {
+    navigator.serviceWorker.register('sw.js', { updateViaCache: 'none' }).catch(() => {});
+    // look for a newer version every time the app comes back to the screen
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible') navigator.serviceWorker.getRegistration().then(r => r?.update()).catch(() => {});
+    });
+  }
 }
 init();
 
