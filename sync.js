@@ -9,6 +9,7 @@ const LIB = 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 const REM_KEY = 'luja:remember';
 const ACC_KEY = 'luja:account';
 const BUCKET = 'photos';
+const TABLES = ['profiles', 'items', 'looks', 'daily', 'ratings', 'stars', 'challenges'];
 export const ownerAccount = owner => (owner === 'jamil' ? 'jojo' : 'lulu');
 
 /* "Remember this phone": the login token lives in localStorage (kept) or
@@ -71,9 +72,9 @@ export async function signOut() {
 /* ── read everything ── */
 export async function fetchAll() {
   const c = await client();
-  const [profiles, items, looks, daily, ratings] = await Promise.all(
-    ['profiles', 'items', 'looks', 'daily', 'ratings'].map(t => c.from(t).select('*').limit(5000).then(ok)));
-  return { profiles, items, looks, daily, ratings };
+  const [profiles, items, looks, daily, ratings, stars, challenges] = await Promise.all(
+    TABLES.map(t => c.from(t).select('*').limit(5000).then(ok)));
+  return { profiles, items, looks, daily, ratings, stars, challenges };
 }
 export async function download(path) {
   const c = await client();
@@ -140,6 +141,20 @@ export async function clearRatings() {
   ok(await c.from('ratings').delete().gte('stars', 1));
 }
 
+/* ── weekly stars & the loser's challenge ── */
+export async function giveStar(rec) {
+  const c = await client();
+  ok(await c.from('stars').insert({ id: rec.id, week: rec.week, giver: rec.giver, receiver: rec.receiver, note: rec.note || null, created: rec.created }));
+}
+export async function takeStar(id) {
+  const c = await client();
+  ok(await c.from('stars').delete().eq('id', id));
+}
+export async function putChallenge(rec) {
+  const c = await client();
+  ok(await c.from('challenges').upsert({ id: rec.id, week: rec.week, by: rec.by, text: rec.text, done: !!rec.done, updated: rec.updated }));
+}
+
 export async function setUsername(account, username) {
   const c = await client();
   ok(await c.from('profiles').update({ username }).eq('account', account));
@@ -154,6 +169,8 @@ export async function wipe() {
   const items = ok(await c.from('items').select('img_path'));
   const daily = ok(await c.from('daily').select('img_path'));
   ok(await c.from('ratings').delete().gte('stars', 1));
+  ok(await c.from('stars').delete().neq('id', ''));
+  ok(await c.from('challenges').delete().neq('id', ''));
   ok(await c.from('daily').delete().neq('id', ''));
   ok(await c.from('looks').delete().neq('id', ''));
   ok(await c.from('items').delete().neq('id', ''));
@@ -166,7 +183,7 @@ export async function subscribe(onChange) {
   let t;
   const fire = () => { clearTimeout(t); t = setTimeout(onChange, 600); };
   const ch = c.channel('luja-live');
-  for (const table of ['profiles', 'items', 'looks', 'daily', 'ratings']) ch.on('postgres_changes', { event: '*', schema: 'public', table }, fire);
+  for (const table of TABLES) ch.on('postgres_changes', { event: '*', schema: 'public', table }, fire);
   ch.subscribe();
   return () => c.removeChannel(ch);
 }

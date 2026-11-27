@@ -2,7 +2,7 @@
    Everything is stored on-device in IndexedDB (photos included). */
 
 import * as remote from './sync.js';
-const APP_VERSION = '7';
+const APP_VERSION = '8';
 
 /* ───────────────────────── constants ───────────────────────── */
 const PEOPLE = {
@@ -77,6 +77,8 @@ const ICONS = {
   user: '<circle cx="12" cy="8" r="4"/><path d="M4 21a8 8 0 0 1 16 0"/>',
   logout: '<path d="M15 4h3a2 2 0 0 1 2 2v12a2 2 0 0 1-2 2h-3"/><path d="M10 17l-5-5 5-5"/><path d="M5 12h11"/>',
   star: '<path d="M12 3.5l2.6 5.3 5.8.8-4.2 4.1 1 5.8L12 16.8l-5.2 2.7 1-5.8-4.2-4.1 5.8-.8z"/>',
+  trophy: '<path d="M8 4h8v5a4 4 0 0 1-8 0z"/><path d="M8 6H5a3 3 0 0 0 3 4M16 6h3a3 3 0 0 1-3 4"/><path d="M12 13v4M8 20h8M10 17h4"/>',
+  crown: '<path d="M4 8l4 4 4-7 4 7 4-4-2 11H6z"/>',
   key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3M14 9l2 2"/>',
 };
 const icon = (n, cls = '') => `<svg class="ic ${cls}" viewBox="0 0 24 24" aria-hidden="true">${ICONS[n] || ''}</svg>`;
@@ -108,10 +110,10 @@ async function cloud(fn) {
 let db;
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('luja-closet', 3);
+    const r = indexedDB.open('luja-closet', 4);
     r.onupgradeneeded = () => {
       const d = r.result;
-      for (const s of ['items', 'looks', 'daily', 'accounts', 'meta']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' });
+      for (const s of ['items', 'looks', 'daily', 'accounts', 'meta', 'stars', 'challenges']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' });
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -414,7 +416,7 @@ const S = {
     jamil:  { occ: 'outside', locks: {}, list: [], idx: 0, error: '', stripCat: 'top' },
   },
   couple: { occ: 'outside', list: [], idx: 0, error: '' },
-  items: [], looks: [], daily: [], accounts: [], me: null,
+  items: [], looks: [], daily: [], accounts: [], stars: [], challenges: [], me: null,
 };
 
 /* ───────────────────────── rendering ───────────────────────── */
@@ -424,7 +426,7 @@ function render(keepScroll = true) {
   if (!S.me) { document.body.dataset.view = 'login'; app.innerHTML = viewLogin(); setupLogin(); return; }
   document.body.dataset.view = S.view;
   document.querySelectorAll('.tabbar button').forEach(b => b.classList.toggle('on', b.dataset.view === S.view));
-  app.innerHTML = S.view === 'match' ? viewMatch() : S.view === 'daily' ? viewDaily() : viewPerson(S.view);
+  app.innerHTML = S.view === 'match' ? viewMatch() : S.view === 'daily' ? viewDaily() : S.view === 'stars' ? viewStars() : viewPerson(S.view);
   if (keepScroll) window.scrollTo(0, y);
 }
 
@@ -1285,16 +1287,175 @@ const adminActions = {
     render(); adminPanel(); toast('Ratings cleared');
   },
   'admin-wipe': async () => {
-    if (!(await confirmSheet('Erase everything?', remote.enabled ? 'All clothes, saved looks, diary photos and ratings will be permanently deleted from BOTH phones and the cloud. This cannot be undone.' : 'All clothes, saved looks and diary photos on this device will be permanently deleted. This cannot be undone.', 'Erase all'))) { adminPanel(); return; }
+    if (!(await confirmSheet('Erase everything?', remote.enabled ? 'All clothes, saved looks, diary photos, ratings and stars will be permanently deleted from BOTH phones and the cloud. This cannot be undone.' : 'All clothes, saved looks and diary photos on this device will be permanently deleted. This cannot be undone.', 'Erase all'))) { adminPanel(); return; }
     if (!(await cloud(() => remote.wipe()))) { adminPanel(); return; }
-    for (const s of ['items', 'looks', 'daily']) await P(os(s, 'readwrite').clear());
-    S.items = []; S.looks = []; S.daily = [];
+    for (const s of ['items', 'looks', 'daily', 'stars', 'challenges']) await P(os(s, 'readwrite').clear());
+    S.items = []; S.looks = []; S.daily = []; S.stars = []; S.challenges = [];
     invalidate('lupita'); invalidate('jamil');
     closeSheet(); render(); toast('Everything erased');
   },
   'sign-out': () => signOut(),
 };
 Object.assign(actions, adminActions);
+
+/* ───────────────────────── stars: weekly game ─────────────────────────
+   You give each other stars all week. The week starts over every Sunday at
+   6:00 AM; whoever got fewer stars does the challenge the winner wrote. */
+const RESET_HOUR = 6;
+const STAR_REASONS = ['Looked amazing', 'Made me laugh', 'Sweet surprise', 'Took care of me', 'Best outfit', 'Just because'];
+const isoLocal = d => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+function weekStart(t = Date.now()) {
+  const d = new Date(t - RESET_HOUR * 3600e3);
+  d.setDate(d.getDate() - d.getDay());
+  d.setHours(RESET_HOUR, 0, 0, 0);
+  return d;
+}
+const weekKey = (t = Date.now()) => isoLocal(weekStart(t));
+const prevWeekKey = () => weekKey(weekStart().getTime() - 3600e3);
+const weekLabel = k => {
+  const a = new Date(k + 'T12:00:00'), b = new Date(a); b.setDate(b.getDate() + 6);
+  const f = d => d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' });
+  return `${f(a)} – ${f(b)}`;
+};
+const players = () => ['lulu', 'jojo'].map(id => S.accounts.find(a => a.id === id) || DEFAULT_ACCOUNTS.find(a => a.id === id));
+const challengeOf = (week, by) => S.challenges.find(c => c.id === `${week}:${by}`);
+function weekScore(week) {
+  const n = { lulu: 0, jojo: 0 };
+  for (const x of S.stars) if (x.week === week && x.receiver in n) n[x.receiver]++;
+  const [lu, jo] = [n.lulu, n.jojo];
+  return { n, total: lu + jo, tie: lu === jo, winner: lu > jo ? 'lulu' : jo > lu ? 'jojo' : null, loser: lu < jo ? 'lulu' : jo < lu ? 'jojo' : null };
+}
+function timeLeft() {
+  const next = weekStart(); next.setDate(next.getDate() + 7);
+  const ms = next - Date.now(), d = Math.floor(ms / 864e5), h = Math.floor(ms % 864e5 / 36e5), m = Math.floor(ms % 36e5 / 6e4);
+  return d ? `${d}d ${h}h left` : h ? `${h}h ${m}m left` : `${m}m left`;
+}
+const nameOf = id => esc(S.accounts.find(a => a.id === id)?.username || id);
+const ownerOf = id => (id === 'jojo' ? 'jamil' : 'lupita');
+
+function verdictCard(week, { compact = false } = {}) {
+  const r = weekScore(week);
+  if (!r.total) return '';
+  const score = `${r.n.lulu} – ${r.n.jojo}`;
+  const chBlock = (by, forWho) => {
+    const ch = challengeOf(week, by);
+    if (!ch?.text) return `<div class="ch-line"><p class="muted">${nameOf(by)} didn't set a challenge — ${nameOf(by)} picks one now.</p></div>`;
+    return `<div class="ch-line ${ch.done ? 'done' : ''}">
+        <p class="kicker">${nameOf(by)}'s challenge for ${nameOf(forWho)}</p>
+        <p class="ch-text">“${esc(ch.text)}”</p>
+        <button class="btn sm ${ch.done ? '' : 'primary'}" data-act="ch-done" data-id="${ch.id}">${icon('check')}${ch.done ? 'Done ✦' : 'Mark as done'}</button>
+      </div>`;
+  };
+  const body = r.tie
+    ? `<h3>It's a tie, ${score}</h3><p class="muted">Nobody escapes: you both do each other's challenge.</p>${chBlock('jojo', 'lulu')}${chBlock('lulu', 'jojo')}`
+    : `<h3><span class="w-${ownerOf(r.loser)}">${nameOf(r.loser)}</span> lost, ${score}</h3><p class="muted">${nameOf(r.winner)} won the week ${icon('crown')}</p>${chBlock(r.winner, r.loser)}`;
+  return `<section class="verdict ${compact ? 'compact' : ''}"><p class="kicker">${icon('trophy')}Last week · ${weekLabel(week)}</p>${body}</section>`;
+}
+
+function viewStars() {
+  const wk = weekKey(), r = weekScore(wk), me = S.me.id;
+  const other = players().find(p => p.id !== me);
+  const board = `<section class="scoreboard">${players().map(p => {
+      const lead = !r.tie && r.winner === p.id;
+      return `<div class="sb-col sb-${p.owner} ${lead ? 'lead' : ''}">
+        <span class="avatar a-${p.owner}">${esc(p.username.slice(0, 2))}${lead ? `<i class="crown">${icon('crown')}</i>` : ''}</span>
+        <b class="sb-n">${r.n[p.id]}</b>
+        <span class="sb-name">${esc(p.username)}${p.id === me ? ' · you' : ''}</span>
+      </div>`; }).join('<span class="sb-vs">vs</span>')}
+      <p class="sb-foot">${r.total ? (r.tie ? 'Tied right now' : `${nameOf(r.winner)} is ahead`) : 'No stars yet this week'} · resets Sunday ${RESET_HOUR}:00 AM · ${timeLeft()}</p>
+    </section>`;
+  const give = `<button class="btn big give-star" data-act="star-give">${icon('star')}Give ${esc(other.username)} a star</button>`;
+
+  const mine = challengeOf(wk, me), theirs = challengeOf(wk, other.id);
+  const challenges = `<section class="cat-group"><h2>The loser's challenge</h2>
+      <div class="ch-card">
+        <label class="field"><span>Your challenge if ${esc(other.username)} loses</span>
+          <span class="ch-row"><input id="ch-input" maxlength="140" placeholder="Breakfast in bed on Sunday ☕" value="${esc(mine?.text || '')}"><button class="btn primary" data-act="ch-save">${icon('check')}Save</button></span></label>
+        <div class="ch-theirs"><p class="kicker">${esc(other.username)}'s challenge if you lose</p><p>${theirs?.text ? `“${esc(theirs.text)}”` : '<span class="muted">Not set yet</span>'}</p></div>
+      </div></section>`;
+
+  const list = S.stars.filter(x => x.week === wk).sort((a, b) => b.created - a.created);
+  const feed = `<section class="cat-group"><h2>This week<span>${list.length}</span></h2>${list.length ? `<div class="star-feed">${list.map(x => `
+      <div class="star-row">
+        <span class="star-ic">${icon('star')}</span>
+        <div><b>${nameOf(x.giver)} <span class="muted">→</span> <span class="w-${ownerOf(x.receiver)}">${nameOf(x.receiver)}</span></b>
+        <small>${x.note ? `“${esc(x.note)}” · ` : ''}${new Date(x.created).toLocaleDateString(undefined, { weekday: 'short' })} ${new Date(x.created).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</small></div>
+        ${x.giver === me || S.me.admin ? `<button class="icon-btn sm" data-act="star-undo" data-id="${x.id}" aria-label="Take back">${icon('undo')}</button>` : ''}
+      </div>`).join('')}</div>` : `<div class="empty small"><p>Stars you give each other show up here.</p></div>`}</section>`;
+
+  const weeks = [...new Set(S.stars.map(x => x.week))].filter(w => w < prevWeekKey()).sort().reverse().slice(0, 12);
+  const history = weeks.length ? `<section class="cat-group"><h2>Past weeks</h2><div class="star-feed">${weeks.map(w => {
+      const s = weekScore(w), ch = s.winner ? challengeOf(w, s.winner) : null;
+      return `<div class="star-row hist"><span class="star-ic">${icon('trophy')}</span><div><b>${weekLabel(w)} · ${s.n.lulu} – ${s.n.jojo}</b>
+        <small>${s.tie ? 'Tie' : `${nameOf(s.loser)} lost`}${ch?.text ? ` · “${esc(ch.text)}”${ch.done ? ' ✓' : ''}` : ''}</small></div></div>`; }).join('')}</div></section>` : '';
+
+  return hero('Every week', `Stars<em>.</em>`, `Give each other stars all week. Sunday at ${RESET_HOUR} AM it starts over, and whoever has fewer stars does the winner's challenge.`)
+    + verdictCard(prevWeekKey()) + board + give + challenges + feed + history;
+}
+
+function starSheet() {
+  const other = players().find(p => p.id !== S.me.id);
+  let note = '';
+  const body = openSheet(`<div class="confirm star-sheet">
+      <span class="big-star">${icon('star')}</span>
+      <h3>A star for ${esc(other.username)}</h3>
+      <p class="muted">What's it for? (optional)</p>
+      <div class="chips wrap center" id="st-reasons">${STAR_REASONS.map(t => chip('st-reason', esc(t), esc(t), false)).join('')}</div>
+      <label class="field"><input id="st-note" maxlength="80" placeholder="Or write your own…"></label>
+      <div class="row-btns"><button class="btn grow" data-act="close-sheet">Cancel</button><button class="btn primary grow" data-act="st-send">${icon('star')}Give star</button></div>
+    </div>`);
+  sheetHandlers = {
+    'st-reason': el => {
+      const on = !el.classList.contains('on');
+      body.querySelectorAll('#st-reasons .chip').forEach(b => b.classList.remove('on'));
+      el.classList.toggle('on', on);
+      $('#st-note', body).value = on ? el.dataset.val : '';
+    },
+    'st-send': async el => {
+      note = $('#st-note', body).value.trim();
+      const rec = { id: uid(), week: weekKey(), giver: S.me.id, receiver: other.id, note, created: Date.now() };
+      el.disabled = true;
+      if (!(await cloud(() => remote.giveStar(rec)))) { el.disabled = false; return; }
+      await dbPut('stars', rec); S.stars.push(rec);
+      closeSheet(); render(); toast(`${icon('star')} Star sent to ${esc(other.username)}`);
+    },
+  };
+}
+
+Object.assign(actions, {
+  'star-give': () => starSheet(),
+  'star-undo': async el => {
+    const x = S.stars.find(s => s.id === el.dataset.id);
+    if (!x || !(await confirmSheet('Take this star back?', `${nameOf(x.receiver)} will have one star less this week.`, 'Take back'))) return;
+    if (!(await cloud(() => remote.takeStar(x.id)))) return;
+    await dbDel('stars', x.id);
+    S.stars = S.stars.filter(s => s.id !== x.id);
+    render(); toast('Star taken back');
+  },
+  'ch-save': async () => {
+    const text = $('#ch-input').value.trim(), wk = weekKey();
+    const old = challengeOf(wk, S.me.id);
+    const rec = { id: `${wk}:${S.me.id}`, week: wk, by: S.me.id, text, done: old?.done || false, updated: Date.now() };
+    if (!(await cloud(() => remote.putChallenge(rec)))) return;
+    await dbPut('challenges', rec);
+    S.challenges = [...S.challenges.filter(c => c.id !== rec.id), rec];
+    render(); toast(`${icon('check')} Challenge saved`);
+  },
+  'ch-done': async el => {
+    const ch = S.challenges.find(c => c.id === el.dataset.id);
+    if (!ch) return;
+    const rec = { ...ch, done: !ch.done, updated: Date.now() };
+    if (!(await cloud(() => remote.putChallenge(rec)))) return;
+    await dbPut('challenges', rec);
+    S.challenges = S.challenges.map(c => (c.id === rec.id ? rec : c));
+    render(); toast(rec.done ? `${icon('check')} Challenge done!` : 'Marked as not done');
+  },
+});
+// keep the countdown fresh and flip to the new week on Sunday morning
+setInterval(() => {
+  const typing = document.activeElement?.matches?.('input, textarea');
+  if (S.me && S.view === 'stars' && !typing && !$('#sheet-root').innerHTML) render();
+}, 60000);
 
 /* ───────────────────────── backup ───────────────────────── */
 async function exportBackup() {
@@ -1352,6 +1513,7 @@ async function importBackup(file) {
 
 /* ───────────────────────── cloud sync ───────────────────────── */
 let stopLive = null, pulling = null, pullAgain = false;
+let starsPulled = false;  // after the first pull, new stars for you pop up a message
 const syncState = { last: null, error: '' };
 function startSync() {
   pull();
@@ -1363,7 +1525,7 @@ window.addEventListener('online', () => { if (S.me && remote.enabled) pull(); })
 async function pull() {
   if (pulling) { pullAgain = true; return pulling; }
   pulling = (async () => {
-    try { await doPull(); syncState.last = new Date(); syncState.error = ''; }
+    try { await doPull(); starsPulled = true; syncState.last = new Date(); syncState.error = ''; }
     catch (e) { console.error(e); syncState.error = navigator.onLine ? 'Sync problem' : 'Offline'; }
   })();
   await pulling; pulling = null;
@@ -1425,6 +1587,10 @@ async function doPull() {
     d.who = S.accounts.find(a => a.id === d.by)?.owner || d.who;
   }
   const looks = data.looks.map(l => ({ ...l, owner: l.owner || undefined, jids: l.jids || undefined, synced: true }));
+  const starsChanged = JSON.stringify(S.stars.map(x => x.id).sort()) !== JSON.stringify(data.stars.map(x => x.id).sort())
+    || JSON.stringify(S.challenges.map(x => [x.id, x.text, x.done]).sort()) !== JSON.stringify(data.challenges.map(x => [x.id, x.text, x.done]).sort());
+  const seen = new Set(S.stars.map(x => x.id));
+  const fresh = data.stars.filter(x => !seen.has(x.id) && x.receiver === me.id);
   // keep rows this phone isn't allowed to upload (they stay local-only)
   const keep = (local, remoteRows) => local.filter(l => !l.synced && !remoteRows.some(r => r.id === l.id));
 
@@ -1437,11 +1603,22 @@ async function doPull() {
     for (const r of rows) await dbPut(name, r);
   }
   if (accounts.length) { await P(os('accounts', 'readwrite').clear()); for (const a of accounts) await dbPut('accounts', a); }
+  if (starsChanged) {
+    for (const [name, rows] of [['stars', data.stars], ['challenges', data.challenges]]) {
+      await P(os(name, 'readwrite').clear());
+      for (const r of rows) await dbPut(name, r);
+    }
+    S.stars = data.stars; S.challenges = data.challenges;
+    if (fresh.length && (seen.size || starsPulled)) {
+      const from = S.accounts.find(a => a.id === fresh[0].giver)?.username || 'Someone';
+      toast(`${icon('star')} ${esc(from)} gave you ${fresh.length > 1 ? fresh.length + ' stars' : 'a star'}${fresh.length === 1 && fresh[0].note ? ` — “${esc(fresh[0].note)}”` : ''}`);
+    }
+  }
 
   S.items = nItems; S.daily = nDaily; S.looks = nLooks;
   if (accounts.length) { S.accounts = accounts.sort((a, b) => (b.admin ? 1 : 0) - (a.admin ? 1 : 0)); S.me = S.accounts.find(a => a.id === me.id) || S.me; }
   const after = JSON.stringify([S.items.map(i => [i.id, i.img_path, i.name, i.color, i.occ, i.cat, i.pattern]), S.daily.map(d => [d.id, d.img_path, d.note, d.occ, d.date, d.ratings]), S.looks.map(l => l.id), S.accounts.map(a => [a.id, a.username])]);
-  if (before !== after) {
+  if (before !== after || starsChanged) {
     invalidate('lupita'); invalidate('jamil');
     for (const st of Object.values(S.style)) for (const c in st.locks) if (!S.items.some(i => i.id === st.locks[c])) delete st.locks[c];
     render();
@@ -1454,13 +1631,13 @@ document.addEventListener('click', e => {
   if (!el || el.disabled) return;
   const a = el.dataset.act;
   if (!S.me && a !== 'close-sheet') return;
-  if (a.startsWith('ed-') || a.startsWith('dy-')) { sheetHandlers[a]?.(el, e); return; }
+  if (a.startsWith('ed-') || a.startsWith('dy-') || a.startsWith('st-')) { sheetHandlers[a]?.(el, e); return; }
   if (actions[a]) { e.preventDefault(); actions[a](el, e); }
 });
 document.addEventListener('keydown', e => { if (e.key === 'Escape') closeSheet(); });
 
 async function loadAll() {
-  [S.items, S.looks, S.daily, S.accounts] = await Promise.all([dbAll('items'), dbAll('looks'), dbAll('daily'), dbAll('accounts')]);
+  [S.items, S.looks, S.daily, S.accounts, S.stars, S.challenges] = await Promise.all(['items', 'looks', 'daily', 'accounts', 'stars', 'challenges'].map(dbAll));
   if (!S.accounts.length) {
     for (const a of DEFAULT_ACCOUNTS) await dbPut('accounts', { ...a });
     S.accounts = DEFAULT_ACCOUNTS.map(a => ({ ...a }));
@@ -1471,7 +1648,7 @@ async function loadAll() {
 async function init() {
   document.querySelectorAll('[data-icon]').forEach(el => { el.innerHTML = icon(el.dataset.icon); });
   $('.topbar [data-act="settings"]').innerHTML = icon('gear');
-  if (!['lupita', 'jamil', 'match', 'daily'].includes(S.view)) S.view = 'lupita';
+  if (!['lupita', 'jamil', 'match', 'daily', 'stars'].includes(S.view)) S.view = 'lupita';
   try {
     db = await openDB();
     await loadAll();

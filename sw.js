@@ -3,7 +3,7 @@
 //   newest version; the saved copy is used when offline or the network is slow.
 // - Fonts and the Supabase library: saved copy first (they never change).
 // - When a new version installs, every open LuJa window reloads into it.
-const CACHE = 'luja-v7';
+const CACHE = 'luja-v8';
 const SHELL = ['./', 'index.html', 'styles.css', 'app.js', 'sync.js', 'config.js', 'icon.svg', 'icon-180.png', 'manifest.webmanifest'];
 
 self.addEventListener('install', e => {
