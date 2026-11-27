@@ -1,6 +1,8 @@
 /* LuJa Closet — Lupita & Jamil's shared wardrobe.
    Everything is stored on-device in IndexedDB (photos included). */
 
+import * as remote from './sync.js';
+
 /* ───────────────────────── constants ───────────────────────── */
 const PEOPLE = {
   lupita: { name: 'Lupita', pron: 'her' },
@@ -90,6 +92,17 @@ const store = {
   set(k, v) { try { localStorage.setItem('luja:' + k, JSON.stringify(v)); } catch {} },
 };
 
+/* run a cloud write; on failure tell the user and return false */
+async function cloud(fn) {
+  if (!remote.enabled) return true;
+  try { const r = await fn(); return r === undefined ? true : r; }
+  catch (e) {
+    console.error(e);
+    toast(navigator.onLine ? `Couldn't save to the cloud — try again` : `You're offline — connect to save`);
+    return false;
+  }
+}
+
 /* ───────────────────────── IndexedDB ───────────────────────── */
 let db;
 function openDB() {
@@ -124,6 +137,7 @@ const canEdit = owner => !!S.me && S.me.owner === owner;
 const otherOwner = o => (o === 'jamil' ? 'lupita' : 'jamil');
 /* who posted a diary entry (older entries fall back to who is in the photo) */
 const dailyBy = d => d.by || (d.who === 'jamil' ? 'jojo' : d.who === 'lupita' ? 'lulu' : null);
+const posterOf = d => S.accounts.find(a => a.id === dailyBy(d));
 const canEditDaily = d => { const b = dailyBy(d); return !b || b === S.me?.id; };
 
 /* object-URL cache for blobs */
@@ -436,14 +450,29 @@ function setupLogin() {
   f.onsubmit = async e => {
     e.preventDefault();
     const u = $('#lg-user').value.trim().toLowerCase(), pw = $('#lg-pass').value;
-    const acc = S.accounts.find(a => a.username.toLowerCase() === u);
-    if (!acc || acc.hash !== await hashPw(pw)) {
-      $('#lg-err').textContent = 'Wrong username or password';
+    const remember = $('#lg-remember').checked;
+    const fail = msg => {
+      $('#lg-err').textContent = msg;
       $('.login-card').classList.remove('shake'); void $('.login-card').offsetWidth; $('.login-card').classList.add('shake');
-      return;
+    };
+    let acc;
+    if (remote.enabled) {
+      const btn = f.querySelector('button[type=submit]'); btn.disabled = true;
+      try {
+        const id = await remote.signIn(u, pw, remember);
+        acc = S.accounts.find(a => a.id === id) || { ...DEFAULT_ACCOUNTS.find(a => a.id === id) };
+      } catch (err) {
+        btn.disabled = false;
+        return fail(err.code === 'bad_login' ? 'Wrong username or password' : 'No connection — check your internet');
+      }
+      sessionInfo = { remember };
+    } else {
+      acc = S.accounts.find(a => a.username.toLowerCase() === u);
+      if (!acc || acc.hash !== await hashPw(pw)) return fail('Wrong username or password');
+      await saveSession(acc, remember);
     }
     S.me = acc;
-    await saveSession(acc, $('#lg-remember').checked);
+    if (remote.enabled) startSync();
     S.view = acc.owner; persistNav();
     render(false);
     toast(`${icon('heart')} Welcome, ${esc(acc.username)}`);
@@ -487,6 +516,7 @@ async function forgetSession() {
 }
 function signOut() {
   S.me = null; forgetSession();
+  if (remote.enabled) { remote.signOut(); stopLive?.(); stopLive = null; }
   closeSheet(true); render(false);
 }
 
@@ -712,7 +742,7 @@ function viewDaily() {
         <button class="diary-item" data-act="open-daily" data-id="${d.id}">
           <img loading="lazy" src="${url(d)}" alt="">
           <span class="diary-meta"><b>${new Date(d.date + 'T12:00:00').getDate()}</b><small>${new Date(d.date + 'T12:00:00').toLocaleDateString(undefined, { weekday: 'short' })}</small></span>
-          <span class="who-tag w-${d.who}">${d.who === 'us' ? 'Us' : PEOPLE[d.who].name}</span>
+          ${(() => { const a = posterOf(d); return a ? `<span class="who-tag w-${a.owner}">${esc(a.username)}</span>` : ''; })()}
           ${(() => { const r = ratingFor(d); return r ? `<span class="rate-tag">${icon('star')}${r.n}</span>` : (!canEditDaily(d) ? '<span class="rate-tag todo">Rate</span>' : ''); })()}
         </button>`).join('')}</div></section>`).join('')
     : `<div class="empty small"><p>Your diary starts with the first photo.</p></div>`;
@@ -842,7 +872,14 @@ function editItem(it) {
       if (!canEdit(d.owner)) { toast('You can only edit your own closet'); return; }
       if (!d.occ.length) { toast('Pick at least one occasion'); return; }
       const name = $('#ed-name', body).value.trim() || `${ci(d.color).name} ${CATS[d.cat].label.toLowerCase()}`;
-      const rec = { id: d.id || uid(), owner: d.owner, cat: d.cat, name, color: d.color, pattern: d.pattern, occ: Object.keys(OCC).filter(k => d.occ.includes(k)), img: d.img, created: d.created || Date.now() };
+      let rec = { id: d.id || uid(), owner: d.owner, cat: d.cat, name, color: d.color, pattern: d.pattern, occ: Object.keys(OCC).filter(k => d.occ.includes(k)), img: d.img, img_path: d.img_path, created: d.created || Date.now() };
+      if (remote.enabled) {
+        const btn = body.querySelector('[data-act=ed-save]'); btn.disabled = true;
+        const saved = await cloud(() => remote.putItem(rec, d.img !== it.img));
+        btn.disabled = false;
+        if (!saved) return;
+        rec = saved;
+      }
       await dbPut('items', rec);
       const i = S.items.findIndex(x => x.id === rec.id);
       i >= 0 ? (S.items[i] = rec) : S.items.push(rec);
@@ -855,6 +892,7 @@ function editItem(it) {
     'ed-delete': async () => {
       if (!canEdit(d.owner)) return;
       if (!(await confirmSheet('Delete this piece?', `“${esc(d.name)}” will be removed from the closet and from any saved looks.`))) return;
+      if (!(await cloud(() => remote.delItem(d)))) return;
       await dbDel('items', d.id);
       S.items = S.items.filter(x => x.id !== d.id);
       for (const st of Object.values(S.style)) for (const c in st.locks) if (st.locks[c] === d.id) delete st.locks[c];
@@ -966,7 +1004,8 @@ const actions = {
     if (!o) return;
     const ids = o.pieces.map(p => p.id);
     if (S.looks.some(l => l.type === 'solo' && l.ids.join() === ids.join())) { toast('Already saved'); return; }
-    const rec = { id: uid(), type: 'solo', owner: S.view, occ: st.occ, ids, score: o.score, created: Date.now() };
+    let rec = { id: uid(), type: 'solo', owner: S.view, occ: st.occ, ids, score: o.score, created: Date.now() };
+    if (remote.enabled) { rec = await cloud(() => remote.putLook(rec)); if (!rec) return; }
     await dbPut('looks', rec); S.looks.push(rec);
     render(); toast(`${icon('bookmark')} Look saved`);
   },
@@ -980,6 +1019,7 @@ const actions = {
       <div class="row-btns"><button class="btn danger" data-act="del-look" data-id="${l.id}">${icon('trash')}Remove</button><button class="btn primary grow" data-act="close-sheet">Done</button></div></div>`, { cls: 'wide' });
   },
   'del-look': async el => {
+    if (!(await cloud(() => remote.delLook(el.dataset.id)))) return;
     await dbDel('looks', el.dataset.id);
     S.looks = S.looks.filter(l => l.id !== el.dataset.id);
     closeSheet(); render(); toast('Look removed');
@@ -994,7 +1034,8 @@ const actions = {
     if (!c) return;
     const ids = c.l.pieces.map(p => p.id), jids = c.j.pieces.map(p => p.id);
     if (S.looks.some(l => l.type === 'couple' && l.ids.join() === ids.join() && l.jids.join() === jids.join())) { toast('Already saved'); return; }
-    const rec = { id: uid(), type: 'couple', occ: S.couple.occ, ids, jids, score: c.score, style: c.style, created: Date.now() };
+    let rec = { id: uid(), type: 'couple', occ: S.couple.occ, ids, jids, score: c.score, style: c.style, created: Date.now() };
+    if (remote.enabled) { rec = await cloud(() => remote.putLook(rec)); if (!rec) return; }
     await dbPut('looks', rec); S.looks.push(rec);
     render(); toast(`${icon('hearts')} Couple look saved`);
   },
@@ -1048,7 +1089,6 @@ function dailyEditor(rec) {
         <p class="kicker">${isNew ? 'New diary entry' : fmtDate(d.date)}</p>
         ${got ? `<div class="rated-box"><p class="kicker">${esc(got.name)} rated it</p>${stars(got.n, { size: 'lg' })}<b>${RATE_WORDS[got.n]}</b></div>` : ''}
         <label class="field"><span>Date</span><input type="date" id="dy-date" value="${d.date}" max="${todayISO()}"></label>
-        <div class="field"><span>Who's in it</span><div class="seg small" id="dy-who">${[['us', 'Us both'], ['lupita', 'Lupita'], ['jamil', 'Jamil']].map(([k, l]) => `<button class="${d.who === k ? 'on' : ''}" data-act="dy-who" data-val="${k}">${l}</button>`).join('')}</div></div>
         <div class="field"><span>Occasion</span><div class="chips wrap" id="dy-occ">${Object.entries(OCC).map(([k, o]) => chip('dy-occ', k, icon(o.icon) + o.label, d.occ === k)).join('')}</div></div>
         <label class="field"><span>Note</span><input id="dy-note" maxlength="120" placeholder="Brunch at our spot ☕" value="${esc(d.note)}"></label>
         <div class="row-btns sticky">
@@ -1058,10 +1098,16 @@ function dailyEditor(rec) {
       </div>
     </div>`, { cls: 'wide', onClose: () => URL.revokeObjectURL(u) });
   sheetHandlers = {
-    'dy-who': el => { d.who = el.dataset.val; body.querySelectorAll('#dy-who button').forEach(b => b.classList.toggle('on', b === el)); },
     'dy-occ': el => { d.occ = el.dataset.val; body.querySelectorAll('#dy-occ .chip').forEach(b => b.classList.toggle('on', b === el)); },
     'dy-save': async () => {
-      const r = { id: d.id || uid(), by: d.by || S.me.id, img: d.img, date: $('#dy-date', body).value || todayISO(), who: d.who, occ: d.occ, note: $('#dy-note', body).value.trim(), ratings: d.ratings || {}, created: d.created || Date.now() };
+      let r = { id: d.id || uid(), by: d.by || S.me.id, img: d.img, img_path: d.img_path, date: $('#dy-date', body).value || todayISO(), who: d.who, occ: d.occ, note: $('#dy-note', body).value.trim(), ratings: d.ratings || {}, created: d.created || Date.now() };
+      if (remote.enabled) {
+        const btn = body.querySelector('[data-act=dy-save]'); btn.disabled = true;
+        const saved = await cloud(() => remote.putDaily(r, d.img !== rec.img));
+        btn.disabled = false;
+        if (!saved) return;
+        r = saved;
+      }
       await dbPut('daily', r);
       const i = S.daily.findIndex(x => x.id === r.id);
       i >= 0 ? (S.daily[i] = r) : S.daily.push(r);
@@ -1069,6 +1115,7 @@ function dailyEditor(rec) {
     },
     'dy-del': async () => {
       if (!(await confirmSheet('Delete this photo?', 'It will be removed from your outfit diary.'))) return;
+      if (!(await cloud(() => remote.delDaily(d)))) return;
       await dbDel('daily', d.id);
       S.daily = S.daily.filter(x => x.id !== d.id);
       render(); toast('Photo deleted');
@@ -1085,8 +1132,8 @@ function dailyView(d) {
       <div class="ed-photo tall"><img src="${url(d)}" alt=""></div>
       <div class="ed-form">
         <p class="kicker">${fmtDate(d.date)} · posted by ${esc(by?.username || '')}</p>
-        <h3 class="item-title">${d.note ? esc(d.note) : `${d.who === 'us' ? 'Us both' : PEOPLE[d.who].name} · ${OCC[d.occ]?.label || ''}`}</h3>
-        <div class="chips wrap"><span class="chip">${d.who === 'us' ? 'Us both' : PEOPLE[d.who].name}</span>${OCC[d.occ] ? `<span class="chip">${icon(OCC[d.occ].icon)}${OCC[d.occ].label}</span>` : ''}</div>
+        <h3 class="item-title">${d.note ? esc(d.note) : `${esc(posterOf(d)?.username || '')}'s outfit`}</h3>
+        <div class="chips wrap">${OCC[d.occ] ? `<span class="chip">${icon(OCC[d.occ].icon)}${OCC[d.occ].label}</span>` : ''}</div>
         <div class="rate-box">
           <p class="kicker">Rate ${esc(by?.username || 'this')}'s outfit</p>
           <div id="rate-stars">${stars(mine, { act: 'dy-rate', size: 'xl' })}</div>
@@ -1100,6 +1147,7 @@ function dailyView(d) {
       const n = +el.dataset.val;
       const rec = S.daily.find(x => x.id === d.id);
       if (!rec) return;
+      if (!(await cloud(() => remote.rate(rec.id, S.me.id, n)))) return;
       rec.ratings = { ...(rec.ratings || {}), [S.me.id]: n };
       await dbPut('daily', rec);
       $('#rate-stars', body).innerHTML = stars(n, { act: 'dy-rate', size: 'xl' });
@@ -1119,10 +1167,12 @@ async function settingsSheet() {
         <button class="btn sm" data-act="sign-out">${icon('logout')}Sign out</button></div>
       ${S.me.admin ? `<button class="admin-entry" data-act="admin">${icon('shield')}<span><b>Admin panel</b><small>Accounts, both closets, diary</small></span>${icon('arrow')}</button>` : ''}
       <h4>Your data</h4>
-      <p class="muted">Every photo, look and diary post is saved on this device. ${est ? esc(est) + '.' : ''}</p>
+      <p class="muted">${remote.enabled
+        ? `${icon('check')} Shared closet — clothes, looks, diary posts and ratings sync live between both phones${syncState.last ? ` · last synced ${syncState.last.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}` : ''}${syncState.error ? ` · ${esc(syncState.error)}` : ''}. A copy is kept on this phone so it opens instantly.`
+        : `Every photo, look and diary post is saved on this device. ${est ? esc(est) + '.' : ''}`}</p>
       <div class="set-stats"><div><b>${S.items.filter(i => i.owner === 'lupita').length}</b><span>Lupita</span></div><div><b>${S.items.filter(i => i.owner === 'jamil').length}</b><span>Jamil</span></div><div><b>${S.looks.length}</b><span>looks</span></div><div><b>${S.daily.length}</b><span>diary</span></div></div>
-      <h4>Backup &amp; move to another phone</h4>
-      <p class="muted">Download a backup, then open it on the other phone with “Restore”. Restoring merges — nothing is lost, and ratings are combined.</p>
+      <h4>${remote.enabled ? 'Backup' : 'Backup &amp; move to another phone'}</h4>
+      <p class="muted">${remote.enabled ? 'An extra safety copy. Restoring a backup uploads anything missing to the shared closet.' : 'Download a backup, then open it on the other phone with “Restore”. Restoring merges — nothing is lost, and ratings are combined.'}</p>
       <div class="row-btns col"><button class="btn primary" id="st-export">${icon('download')}Download backup</button><button class="btn" id="st-import">${icon('upload')}Restore from backup</button></div>
       <p class="muted tiny">Tip: on iPhone, tap Share → “Add to Home Screen” to use LuJa like a real app.</p>
     </div>`);
@@ -1146,7 +1196,7 @@ function adminPanel() {
         <div class="acc-head"><span class="avatar a-${a.owner}">${esc(a.username.slice(0, 2))}</span>
           <div><b>${esc(a.username)}</b><small>${PEOPLE[a.owner].name}'s closet${a.admin ? ' · admin' : ''}${a.id === S.me.id ? ' · you' : ''}</small></div></div>
         <label class="field"><span>Username</span><input name="username" value="${esc(a.username)}" maxlength="24" autocapitalize="none" spellcheck="false" required></label>
-        <label class="field"><span>New password <small>leave empty to keep</small></span><input name="password" type="password" minlength="4" autocomplete="new-password" placeholder="••••••••"></label>
+        <label class="field"><span>New password <small>leave empty to keep</small></span><input name="password" type="password" autocomplete="new-password" placeholder="••••••••"></label>
         <div class="stat-line"><span>${S.items.filter(i => i.owner === a.owner).length} pieces</span><span>${S.daily.filter(d => dailyBy(d) === a.id).length} diary posts</span></div>
         <button class="btn primary" type="submit">${icon('check')}Save ${esc(a.username)}</button>
       </form>`).join('');
@@ -1166,7 +1216,7 @@ function adminPanel() {
     }).join('')}</div>` : '<p class="muted center">No diary posts yet.</p>';
   } else {
     inner = `<div class="danger-zone">
-        <div><b>Reset accounts</b><p class="muted">Set both usernames and passwords back to the original ones.</p><button class="btn" data-act="admin-reset-acc">${icon('key')}Reset accounts</button></div>
+        ${remote.enabled ? '' : `<div><b>Reset accounts</b><p class="muted">Set both usernames and passwords back to the original ones.</p><button class="btn" data-act="admin-reset-acc">${icon('key')}Reset accounts</button></div>`}
         <div><b>Clear all ratings</b><p class="muted">Removes every star from the diary.</p><button class="btn" data-act="admin-clear-ratings">${icon('star')}Clear ratings</button></div>
         <div><b>Erase everything</b><p class="muted">Deletes all clothes, looks and diary photos on this device. Download a backup first.</p><button class="btn danger" data-act="admin-wipe">${icon('trash')}Erase all data</button></div>
       </div>`;
@@ -1183,11 +1233,16 @@ function adminPanel() {
     const name = f.username.value.trim(), pw = f.password.value;
     if (!/^[\w.\- ]{2,24}$/.test(name)) { toast('Username: 2–24 letters or numbers'); return; }
     if (S.accounts.some(x => x.id !== a.id && x.username.toLowerCase() === name.toLowerCase())) { toast('That username is taken'); return; }
-    if (pw && pw.length < 4) { toast('Password needs at least 4 characters'); return; }
-    const upd = { ...a, username: name, hash: pw ? await hashPw(pw) : a.hash };
+    const minPw = remote.enabled ? 6 : 4;
+    if (pw && pw.length < minPw) { toast(`Password needs at least ${minPw} characters`); return; }
+    if (remote.enabled) {
+      if (name !== a.username && !(await cloud(() => remote.setUsername(a.id, name)))) return;
+      if (pw && !(await cloud(() => remote.setPassword(a.id, pw)))) return;
+    }
+    const upd = { ...a, username: name, hash: pw && !remote.enabled ? await hashPw(pw) : a.hash };
     await dbPut('accounts', upd);
     S.accounts = S.accounts.map(x => x.id === a.id ? upd : x);
-    if (S.me.id === a.id) { S.me = upd; await saveSession(upd, !!sessionInfo?.remember); }
+    if (S.me.id === a.id) { S.me = upd; if (!remote.enabled) await saveSession(upd, !!sessionInfo?.remember); }
     adminPanel(); render();
     toast(`${icon('check')} ${esc(name)} updated${pw ? ' · new password set' : ''}`);
   });
@@ -1199,6 +1254,7 @@ const adminActions = {
   'admin-del-item': async el => {
     const it = S.items.find(i => i.id === el.dataset.id);
     if (!it || !(await confirmSheet('Delete this piece?', `“${esc(it.name)}” will be removed from ${PEOPLE[it.owner].name}'s closet.`))) { adminPanel(); return; }
+    if (!(await cloud(() => remote.delItem(it)))) { adminPanel(); return; }
     await dbDel('items', it.id);
     S.items = S.items.filter(x => x.id !== it.id);
     for (const st of Object.values(S.style)) for (const c in st.locks) if (st.locks[c] === it.id) delete st.locks[c];
@@ -1206,6 +1262,8 @@ const adminActions = {
   },
   'admin-del-daily': async el => {
     if (!(await confirmSheet('Delete this diary post?', 'The photo and its rating will be removed.'))) { adminPanel(); return; }
+    const post = S.daily.find(x => x.id === el.dataset.id);
+    if (post && !(await cloud(() => remote.delDaily(post)))) { adminPanel(); return; }
     await dbDel('daily', el.dataset.id);
     S.daily = S.daily.filter(x => x.id !== el.dataset.id);
     render(); adminPanel(); toast('Post deleted');
@@ -1220,11 +1278,13 @@ const adminActions = {
   },
   'admin-clear-ratings': async () => {
     if (!(await confirmSheet('Clear all ratings?', 'Every star on every diary post will be removed.', 'Clear'))) { adminPanel(); return; }
+    if (!(await cloud(() => remote.clearRatings()))) { adminPanel(); return; }
     for (const d of S.daily) { d.ratings = {}; await dbPut('daily', d); }
     render(); adminPanel(); toast('Ratings cleared');
   },
   'admin-wipe': async () => {
-    if (!(await confirmSheet('Erase everything?', 'All clothes, saved looks and diary photos on this device will be permanently deleted. This cannot be undone.', 'Erase all'))) { adminPanel(); return; }
+    if (!(await confirmSheet('Erase everything?', remote.enabled ? 'All clothes, saved looks, diary photos and ratings will be permanently deleted from BOTH phones and the cloud. This cannot be undone.' : 'All clothes, saved looks and diary photos on this device will be permanently deleted. This cannot be undone.', 'Erase all'))) { adminPanel(); return; }
+    if (!(await cloud(() => remote.wipe()))) { adminPanel(); return; }
     for (const s of ['items', 'looks', 'daily']) await P(os(s, 'readwrite').clear());
     S.items = []; S.looks = []; S.daily = [];
     invalidate('lupita'); invalidate('jamil');
@@ -1263,10 +1323,11 @@ async function importBackup(file) {
     if (data.app !== 'luja-closet') throw new Error('not a LuJa backup');
     toast('Restoring…');
     let n = 0;
-    for (const r of data.items || []) { r.img = await dataURLToBlob(r.img); await dbPut('items', r); n++; }
-    for (const r of data.looks || []) await dbPut('looks', r);
+    const fresh = r => { if (remote.enabled && !S.items.concat(S.looks, S.daily).some(x => x.id === r.id && x.synced)) { delete r.synced; delete r.img_path; } return r; };
+    for (const r of data.items || []) { r.img = await dataURLToBlob(r.img); await dbPut('items', fresh(r)); n++; }
+    for (const r of data.looks || []) await dbPut('looks', fresh(r));
     for (const r of data.daily || []) {
-      r.img = await dataURLToBlob(r.img);
+      r.img = await dataURLToBlob(r.img); fresh(r);
       const cur = S.daily.find(x => x.id === r.id);
       r.ratings = { ...(cur?.ratings || {}), ...(r.ratings || {}) };
       await dbPut('daily', r);
@@ -1278,11 +1339,110 @@ async function importBackup(file) {
     }
     await loadAll(); invalidate('lupita'); invalidate('jamil');
     S.me = S.accounts.find(a => a.id === S.me?.id) || null;
-    if (S.me) await saveSession(S.me, !!sessionInfo?.remember);
+    if (S.me && !remote.enabled) await saveSession(S.me, !!sessionInfo?.remember);
     closeSheet(); render();
+    if (remote.enabled) pull();
     toast(`${icon('check')} Restored ${n} pieces`);
   } catch (e) {
     console.error(e); toast('That file is not a LuJa backup');
+  }
+}
+
+/* ───────────────────────── cloud sync ───────────────────────── */
+let stopLive = null, pulling = null, pullAgain = false;
+const syncState = { last: null, error: '' };
+function startSync() {
+  pull();
+  if (!stopLive) remote.subscribe(() => pull()).then(stop => { stopLive = stop; }).catch(console.error);
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && S.me && remote.enabled) pull(); });
+window.addEventListener('online', () => { if (S.me && remote.enabled) pull(); });
+
+async function pull() {
+  if (pulling) { pullAgain = true; return pulling; }
+  pulling = (async () => {
+    try { await doPull(); syncState.last = new Date(); syncState.error = ''; }
+    catch (e) { console.error(e); syncState.error = navigator.onLine ? 'Sync problem' : 'Offline'; }
+  })();
+  await pulling; pulling = null;
+  if (pullAgain) { pullAgain = false; return pull(); }
+}
+
+async function withImages(rows, local, store) {
+  const out = [], need = [];
+  for (const r of rows) {
+    const l = local.find(x => x.id === r.id);
+    const rec = { ...r, synced: true };
+    if (l && l.img && l.img_path === r.img_path) rec.img = l.img;
+    else if (r.img_path) need.push(rec);
+    if (l?.ratings) rec.ratings = l.ratings;
+    out.push(rec);
+  }
+  let done = 0;
+  const worker = async () => {
+    while (need.length) {
+      const rec = need.shift();
+      try { rec.img = await remote.download(rec.img_path); } catch (e) { console.error(e); }
+      done++;
+      if (done % 4 === 0) toast(`Syncing photos… ${done}`);
+    }
+  };
+  await Promise.all([1, 2, 3, 4].map(worker));
+  return out;
+}
+
+async function doPull() {
+  const me = S.me;
+  if (!me) return;
+  // 1) upload anything that only exists on this phone (first sync / restored backups)
+  const mayUpload = { items: r => me.admin || r.owner === me.owner, daily: r => me.admin || dailyBy(r) === me.id, looks: () => true };
+  let uploaded = 0;
+  for (const r of S.items.filter(r => !r.synced && r.img && mayUpload.items(r))) {
+    try { const s = await remote.putItem(r, true); await dbPut('items', s); Object.assign(r, s); uploaded++; } catch (e) { console.error(e); }
+  }
+  for (const r of S.daily.filter(r => !r.synced && r.img && mayUpload.daily(r))) {
+    try {
+      const s = await remote.putDaily({ ...r, by: dailyBy(r) || me.id }, true); await dbPut('daily', s); Object.assign(r, s); uploaded++;
+      const mine = r.ratings?.[me.id]; if (mine) await remote.rate(r.id, me.id, mine).catch(() => {});
+    } catch (e) { console.error(e); }
+  }
+  for (const r of S.looks.filter(r => !r.synced)) {
+    try { const s = await remote.putLook(r); await dbPut('looks', s); Object.assign(r, s); uploaded++; } catch (e) { console.error(e); }
+  }
+  if (uploaded) toast(`${icon('check')} Uploaded ${uploaded} things to your shared closet`);
+
+  // 2) download the shared state
+  const data = await remote.fetchAll();
+  if (!S.me) return;
+  const accounts = data.profiles.map(p => ({ id: p.account, username: p.username, owner: p.owner, admin: p.is_admin }));
+  const items = await withImages(data.items, S.items);
+  const daily = await withImages(data.daily, S.daily);
+  for (const d of daily) {
+    d.ratings = {};
+    for (const r of data.ratings) if (r.daily_id === d.id) d.ratings[r.rater] = r.stars;
+    d.who = S.accounts.find(a => a.id === d.by)?.owner || d.who;
+  }
+  const looks = data.looks.map(l => ({ ...l, owner: l.owner || undefined, jids: l.jids || undefined, synced: true }));
+  // keep rows this phone isn't allowed to upload (they stay local-only)
+  const keep = (local, remoteRows) => local.filter(l => !l.synced && !remoteRows.some(r => r.id === l.id));
+
+  const before = JSON.stringify([S.items.map(i => [i.id, i.img_path, i.name, i.color, i.occ, i.cat, i.pattern]), S.daily.map(d => [d.id, d.img_path, d.note, d.occ, d.date, d.ratings]), S.looks.map(l => l.id), S.accounts.map(a => [a.id, a.username])]);
+  const nItems = [...items, ...keep(S.items, items)], nDaily = [...daily, ...keep(S.daily, daily)], nLooks = [...looks, ...keep(S.looks, looks)];
+
+  // write the cache
+  for (const [name, rows] of [['items', nItems], ['daily', nDaily], ['looks', nLooks]]) {
+    await P(os(name, 'readwrite').clear());
+    for (const r of rows) await dbPut(name, r);
+  }
+  if (accounts.length) { await P(os('accounts', 'readwrite').clear()); for (const a of accounts) await dbPut('accounts', a); }
+
+  S.items = nItems; S.daily = nDaily; S.looks = nLooks;
+  if (accounts.length) { S.accounts = accounts.sort((a, b) => (b.admin ? 1 : 0) - (a.admin ? 1 : 0)); S.me = S.accounts.find(a => a.id === me.id) || S.me; }
+  const after = JSON.stringify([S.items.map(i => [i.id, i.img_path, i.name, i.color, i.occ, i.cat, i.pattern]), S.daily.map(d => [d.id, d.img_path, d.note, d.occ, d.date, d.ratings]), S.looks.map(l => l.id), S.accounts.map(a => [a.id, a.username])]);
+  if (before !== after) {
+    invalidate('lupita'); invalidate('jamil');
+    for (const st of Object.values(S.style)) for (const c in st.locks) if (!S.items.some(i => i.id === st.locks[c])) delete st.locks[c];
+    render();
   }
 }
 
@@ -1319,7 +1479,12 @@ async function init() {
     app.innerHTML = `<div class="empty"><h3>Storage is blocked</h3><p>This browser is not allowing the app to save data (private mode?). Open LuJa in a normal window.</p></div>`;
     return;
   }
-  S.me = await restoreSession();
+  if (remote.enabled) {
+    let id = null;
+    try { id = await remote.restore(); } catch (e) { console.error(e); }
+    S.me = id ? (S.accounts.find(a => a.id === id) || { ...DEFAULT_ACCOUNTS.find(a => a.id === id) }) : null;
+    if (S.me) { sessionInfo = { remember: remote.isRemembered() }; startSync(); }
+  } else S.me = await restoreSession();
   render(false);
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
