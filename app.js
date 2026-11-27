@@ -94,10 +94,10 @@ const store = {
 let db;
 function openDB() {
   return new Promise((res, rej) => {
-    const r = indexedDB.open('luja-closet', 2);
+    const r = indexedDB.open('luja-closet', 3);
     r.onupgradeneeded = () => {
       const d = r.result;
-      for (const s of ['items', 'looks', 'daily', 'accounts']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' });
+      for (const s of ['items', 'looks', 'daily', 'accounts', 'meta']) if (!d.objectStoreNames.contains(s)) d.createObjectStore(s, { keyPath: 'id' });
     };
     r.onsuccess = () => res(r.result);
     r.onerror = () => rej(r.error);
@@ -423,6 +423,7 @@ function viewLogin() {
           <label class="field"><span>Password</span>
             <span class="pw-wrap"><input id="lg-pass" name="password" type="password" autocomplete="current-password" required><button type="button" class="pw-eye" id="lg-eye" aria-label="Show password">${icon('eye')}</button></span>
           </label>
+          <label class="remember"><input type="checkbox" id="lg-remember" checked><span class="tick">${icon('check')}</span><span><b>Remember this phone</b><small>Stay signed in — no password next time</small></span></label>
           <p class="login-err" id="lg-err" role="alert"></p>
           <button class="btn primary big" type="submit">${icon('arrow')}Enter our closet</button>
         </form>
@@ -441,15 +442,51 @@ function setupLogin() {
       $('.login-card').classList.remove('shake'); void $('.login-card').offsetWidth; $('.login-card').classList.add('shake');
       return;
     }
-    S.me = acc; store.set('me', acc.id);
+    S.me = acc;
+    await saveSession(acc, $('#lg-remember').checked);
     S.view = acc.owner; persistNav();
     render(false);
     toast(`${icon('heart')} Welcome, ${esc(acc.username)}`);
   };
   setTimeout(() => $('#lg-user')?.focus(), 50);
 }
+/* ── session: "Remember this phone" keeps you signed in for a year.
+   Saved in IndexedDB (durable, also survives iOS home-screen restarts) and
+   localStorage as a fallback. A password change signs remembered phones out. */
+const SESSION_DAYS = 365;
+let sessionInfo = null;
+async function saveSession(acc, remember) {
+  const rec = { id: 'session', acc: acc.id, hash: acc.hash, remember, until: Date.now() + SESSION_DAYS * 864e5 };
+  sessionInfo = rec;
+  try { sessionStorage.setItem('luja:me', acc.id); } catch {}
+  if (remember) { await dbPut('meta', rec).catch(() => {}); store.set('session', rec); }
+  else { await dbDel('meta', 'session').catch(() => {}); store.set('session', null); }
+}
+async function restoreSession() {
+  let rec = null;
+  try { rec = await P(os('meta').get('session')); } catch {}
+  rec = rec || store.get('session', null);
+  if (rec && rec.remember && rec.until > Date.now()) {
+    const acc = S.accounts.find(a => a.id === rec.acc);
+    if (acc && acc.hash === rec.hash) { sessionInfo = rec; return saveSession(acc, true).then(() => acc); } // slide the year forward
+  }
+  // someone signed in with the previous version: remember them
+  const legacy = S.accounts.find(a => a.id === store.get('me', null));
+  if (legacy) { store.set('me', null); await saveSession(legacy, true); return legacy; }
+  // not remembered: only keep the login while this tab/app session is open
+  let id = null; try { id = sessionStorage.getItem('luja:me'); } catch {}
+  const acc = S.accounts.find(a => a.id === id);
+  if (acc) sessionInfo = { remember: false };
+  return acc || null;
+}
+async function forgetSession() {
+  sessionInfo = null;
+  try { sessionStorage.removeItem('luja:me'); } catch {}
+  store.set('session', null); store.set('me', null);
+  await dbDel('meta', 'session').catch(() => {});
+}
 function signOut() {
-  S.me = null; store.set('me', null);
+  S.me = null; forgetSession();
   closeSheet(true); render(false);
 }
 
@@ -1078,7 +1115,7 @@ async function settingsSheet() {
   let est = '';
   try { const e = await navigator.storage.estimate(); est = `${(e.usage / 1048576).toFixed(1)} MB used on this device`; } catch {}
   const body = openSheet(`<div class="confirm settings">
-      <div class="me-row"><span class="avatar a-${S.me.owner}">${esc(S.me.username.slice(0, 2))}</span><div><b>${esc(S.me.username)}</b><small>${S.me.admin ? 'Admin · ' : ''}${PEOPLE[S.me.owner].name}'s account</small></div>
+      <div class="me-row"><span class="avatar a-${S.me.owner}">${esc(S.me.username.slice(0, 2))}</span><div><b>${esc(S.me.username)}</b><small>${S.me.admin ? 'Admin · ' : ''}${PEOPLE[S.me.owner].name}'s account</small><small class="remembered">${sessionInfo?.remember ? `${icon('check')}Remembered on this phone` : 'Not remembered — you’ll sign in next time'}</small></div>
         <button class="btn sm" data-act="sign-out">${icon('logout')}Sign out</button></div>
       ${S.me.admin ? `<button class="admin-entry" data-act="admin">${icon('shield')}<span><b>Admin panel</b><small>Accounts, both closets, diary</small></span>${icon('arrow')}</button>` : ''}
       <h4>Your data</h4>
@@ -1150,7 +1187,7 @@ function adminPanel() {
     const upd = { ...a, username: name, hash: pw ? await hashPw(pw) : a.hash };
     await dbPut('accounts', upd);
     S.accounts = S.accounts.map(x => x.id === a.id ? upd : x);
-    if (S.me.id === a.id) S.me = upd;
+    if (S.me.id === a.id) { S.me = upd; await saveSession(upd, !!sessionInfo?.remember); }
     adminPanel(); render();
     toast(`${icon('check')} ${esc(name)} updated${pw ? ' · new password set' : ''}`);
   });
@@ -1178,6 +1215,7 @@ const adminActions = {
     for (const a of DEFAULT_ACCOUNTS) await dbPut('accounts', { ...a });
     S.accounts = DEFAULT_ACCOUNTS.map(a => ({ ...a }));
     S.me = S.accounts.find(a => a.id === S.me.id);
+    await saveSession(S.me, !!sessionInfo?.remember);
     render(); adminPanel(); toast('Accounts reset');
   },
   'admin-clear-ratings': async () => {
@@ -1240,6 +1278,7 @@ async function importBackup(file) {
     }
     await loadAll(); invalidate('lupita'); invalidate('jamil');
     S.me = S.accounts.find(a => a.id === S.me?.id) || null;
+    if (S.me) await saveSession(S.me, !!sessionInfo?.remember);
     closeSheet(); render();
     toast(`${icon('check')} Restored ${n} pieces`);
   } catch (e) {
@@ -1280,7 +1319,7 @@ async function init() {
     app.innerHTML = `<div class="empty"><h3>Storage is blocked</h3><p>This browser is not allowing the app to save data (private mode?). Open LuJa in a normal window.</p></div>`;
     return;
   }
-  S.me = S.accounts.find(a => a.id === store.get('me', null)) || null;
+  S.me = await restoreSession();
   render(false);
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {});
 }
