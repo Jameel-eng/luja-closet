@@ -26,6 +26,19 @@ insert into public.profiles (account, user_id, username, owner, is_admin)
 select 'lulu', (select id from auth.users where email = 'lulu@luja.app'), 'LuLu', 'lupita', false
 on conflict (account) do update set user_id = excluded.user_id;
 
+-- users added later (jojo@ / lulu@luja.app) are linked automatically
+create or replace function public.link_profile() returns trigger
+language plpgsql security definer set search_path = public as
+$$
+begin
+  if new.email like '%@luja.app' then
+    update public.profiles set user_id = new.id where account = split_part(new.email, '@', 1);
+  end if;
+  return new;
+end $$;
+drop trigger if exists luja_link_profile on auth.users;
+create trigger luja_link_profile after insert on auth.users for each row execute function public.link_profile();
+
 -- helpers used by the security rules
 create or replace function public.my_account() returns text
 language sql stable security definer set search_path = public as
