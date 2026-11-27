@@ -397,4 +397,9 @@ main { max-width: 1120px; margin: 0 auto; padding: 0 18px; outline: none; animat
   .hero { padding-top: 34px; }
 }
 
+.splash { min-height: 60vh; display: grid; place-items: center; }
+.splash span { font: 600 44px/1 var(--serif); letter-spacing: -.02em; animation: breathe 1.4s ease-in-out infinite alternate; }
+.splash em { font-style: italic; font-weight: 400; color: var(--accent); }
+@keyframes breathe { from { opacity: .35; } to { opacity: 1; } }
+
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { animation: none !important; transition: none !important; } }

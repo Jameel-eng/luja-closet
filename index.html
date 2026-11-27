@@ -16,7 +16,8 @@
   <link rel="apple-touch-icon" href="icon-180.png">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+  <!-- fonts load without blocking the first paint -->
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:ital,opsz,wght@0,9..144,400;0,9..144,600;1,9..144,400;1,9..144,500&family=Inter:wght@400;500;600&display=swap" rel="stylesheet" media="print" onload="this.media='all'">
   <link rel="stylesheet" href="styles.css">
 </head>
 <body data-view="lupita">
@@ -30,7 +31,7 @@
     <button class="icon-btn" data-act="settings" aria-label="Settings &amp; backup"></button>
   </header>
 
-  <main id="app" tabindex="-1"></main>
+  <main id="app" tabindex="-1"><div class="splash"><span>Lu<em>&amp;</em>Ja</span></div></main>
 
   <nav class="tabbar" aria-label="Sections">
     <button data-act="nav" data-view="lupita"><span class="tab-ic" data-icon="hanger"></span><span>Lupita</span></button>
