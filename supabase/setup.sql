@@ -99,6 +99,11 @@ create table if not exists public.ratings (
   primary key (daily_id, rater)
 );
 
+-- the app talks to these tables through the Data API (rules below still apply)
+grant usage on schema public to anon, authenticated;
+grant select, insert, update, delete on public.profiles, public.items, public.looks, public.daily, public.ratings to authenticated;
+grant execute on function public.my_account(), public.my_owner(), public.is_admin() to authenticated;
+
 alter table public.profiles enable row level security;
 alter table public.items    enable row level security;
 alter table public.looks    enable row level security;
